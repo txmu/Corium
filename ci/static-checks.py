@@ -2,7 +2,7 @@
 import pathlib
 import re
 
-for path in pathlib.Path('.').glob('*.py'):
+for path in [*pathlib.Path('.').glob('*.py'), *pathlib.Path('ci').glob('*.py')]:
     compile(path.read_text(), str(path), 'exec')
 source = pathlib.Path('corix_v108.sh').read_text()
 lines = source.splitlines(keepends=True)

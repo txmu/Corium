@@ -1,0 +1,13 @@
+name: Corium native runtime
+description: Install real Corium runtime dependencies on a disposable hosted runner
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - shell: bash
+      run: |
+        mkdir -p ci-logs
+        set -o pipefail
+        bash ci/install-dependencies.sh 2>&1 | tee ci-logs/provision.log

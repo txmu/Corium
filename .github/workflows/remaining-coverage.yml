@@ -1,0 +1,189 @@
+name: Corium remaining coverage
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 3 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: remaining-coverage-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  applications-compute-build:
+    name: Native ${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [apps, templates, compute, packages]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/runtime
+      - name: Run real transactions and integration assertions
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          set -o pipefail
+          python3 -m unittest -v "ci.test_$SUITE" 2>&1 | tee "ci-logs/$SUITE.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-${{ matrix.suite }}
+          path: ci-logs/
+          retention-days: 14
+  filesystems:
+    name: Actual ${{ matrix.backend }} snapshots
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [btrfs, zfs]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/runtime
+      - name: Provision loopback backend and test product lifecycle
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: bash ci/run-filesystems.sh "$BACKEND"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: filesystem-${{ matrix.backend }}
+          path: ci-logs/
+          retention-days: 14
+  crash-and-disk-full:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/runtime
+      - name: SIGKILL and actual ext4 ENOSPC
+        run: bash ci/run-faults.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crash-and-disk-full
+          path: ci-logs/
+          retention-days: 14
+  cold-powercut:
+    name: VM power cut (${{ matrix.mode }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [uncommitted, committed]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/runtime
+      - name: Abrupt VM power loss and actual cold boot recovery
+        env:
+          MODE: ${{ matrix.mode }}
+        run: bash ci/run-powercut.sh "$MODE"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cold-powercut-${{ matrix.mode }}
+          path: ci-logs/
+          retention-days: 14
+  strata:
+    name: Strata ${{ matrix.pm }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        pm: [apt, pacman, dnf, portage]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/runtime
+      - name: Real distro filesystem and native package manager lifecycle
+        env:
+          PM: ${{ matrix.pm }}
+        run: bash ci/run-strata.sh "$PM"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: strata-${{ matrix.pm }}
+          path: ci-logs/
+          retention-days: 14
+  external-package-managers:
+    name: External ${{ matrix.pm }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        pm: [apt, pacman, dnf, portage, xbps, zypper, pkgsrc, pip, npm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/runtime
+      - name: Import actual native manager inventory and compare versions
+        env:
+          PM: ${{ matrix.pm }}
+        run: bash ci/run-external-pm.sh "$PM"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-${{ matrix.pm }}
+          path: ci-logs/
+          retention-days: 14
+  routed-network:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/runtime
+      - name: Independent peers across actual NAT, STUN and relay
+        run: bash ci/run-network.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: routed-network
+          path: ci-logs/
+          retention-days: 14
+  anonymous-networks:
+    name: Actual ${{ matrix.backend }} network
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [tor, i2p]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/runtime
+      - name: Reach genuine destination with production TLS transport
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: bash ci/run-anonymous.sh "$BACKEND"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: anonymous-${{ matrix.backend }}
+          path: ci-logs/
+          retention-days: 14
+  coverage-gate:
+    name: All remaining categories completed
+    if: always()
+    needs: [applications-compute-build, filesystems, crash-and-disk-full, cold-powercut, strata, external-package-managers, routed-network, anonymous-networks]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every category to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['NEEDS_JSON'])
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('| Category | Result |\n|---|---|\n')
+              for name, value in results.items():
+                  summary.write(f"| {name} | {value['result']} |\n")
+          failures = {name: value['result'] for name, value in results.items() if value['result'] != 'success'}
+          assert not failures, failures
+          PY
