@@ -1,0 +1,63 @@
+name: Corium validation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: validation-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validation:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        seed: [108, 2026]
+    env:
+      CORIUM_TEST_SEED: ${{ matrix.seed }}
+      CORIUM_CHAOS_ROUNDS: '16'
+      CORIUM_SOAK_ROUNDS: '16'
+      CORIUM_TEST_LOG_DIR: ${{ github.workspace }}/ci-logs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install real dependencies
+        run: bash ci/install-dependencies.sh
+      - name: Syntax and embedded Python
+        run: |
+          mkdir -p ci-logs
+          for file in *.sh ci/*.sh; do bash -n "$file"; done
+          python ci/static-checks.py | tee ci-logs/python-syntax.log
+          sha256sum *.sh *.py > ci-logs/hashes.txt
+      - name: ShellCheck report
+        run: |
+          shellcheck --format=gcc *.sh ci/*.sh > ci-logs/shellcheck.log 2>&1 || status=$?
+          cat ci-logs/shellcheck.log
+          echo "ShellCheck exit: ${status:-0} (legacy findings reported separately)" >> "$GITHUB_STEP_SUMMARY"
+      - name: All original suites (BLOCKED fails)
+        run: bash test_all.sh
+      - name: Additional native integration regressions
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          python -m unittest -v test_ci_integration 2>&1 | tee ci-logs/integration.log
+      - name: Publish suite summary
+        if: always()
+        run: |
+          if [ -f ci-logs/summary.tsv ]; then
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            cat ci-logs/summary.tsv >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-${{ matrix.os }}-${{ matrix.seed }}
+          path: ci-logs/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+source "$(dirname "$0")/test_helper.sh"
+run_python_tests test_gateway test_core.CoreTests.test_phoenix_adversarial_fields_signature_types_and_duplicate_keys test_core.CoreTests.test_phoenix_history_missing_parent_and_duplicate_transactions test_core.CoreTests.test_history_forged_block_signature_rejected_without_output test_core.CoreTests.test_exodus_real_proposal_notarization_quorum_and_forged_record
