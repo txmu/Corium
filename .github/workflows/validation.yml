@@ -36,16 +36,18 @@ jobs:
           sha256sum *.sh *.py > ci-logs/hashes.txt
       - name: ShellCheck report
         run: |
-          shellcheck --format=gcc *.sh ci/*.sh > ci-logs/shellcheck.log 2>&1 || status=$?
+          ulimit -v 2097152
+          timeout --kill-after=10s 180s shellcheck --format=gcc *.sh ci/*.sh > ci-logs/shellcheck.log 2>&1 || status=$?
           cat ci-logs/shellcheck.log
           echo "ShellCheck exit: ${status:-0} (legacy findings reported separately)" >> "$GITHUB_STEP_SUMMARY"
-      - name: All original suites (BLOCKED fails)
-        run: bash test_all.sh
       - name: Additional native integration regressions
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
           python -m unittest -v test_ci_integration 2>&1 | tee ci-logs/integration.log
+      - name: All original suites (BLOCKED fails)
+        if: ${{ !cancelled() }}
+        run: bash test_all.sh
       - name: Publish suite summary
         if: always()
         run: |
