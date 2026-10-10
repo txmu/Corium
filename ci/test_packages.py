@@ -16,6 +16,7 @@ class Packages(Fixture):
         self.repo=self.root/'repo/dev/hello'; self.repo.mkdir(parents=True)
         configs=self.etc/'repos.conf.d'; configs.mkdir(); (configs/'local.conf').write_text('type=local\npath='+str(self.root/'repo')+'\n')
         self.cache=self.root/'var/cache/corix/binaries'; self.cache.mkdir(parents=True,exist_ok=True)
+        (self.root/'var/cache/corix/sources').mkdir(parents=True,exist_ok=True)
         self.build=self.repo/'hello.build'
 
     def binary(self,slot,version=1,path='usr/bin/hello',depends=''):
@@ -59,7 +60,7 @@ package() {{
 
     def test_parallel_slots_distinct_paths_and_removal_preserves_other_slot(self):
         self.binary('0',path='usr/bin/hello0'); self.run_core('DEP_MODE=auto; corix_install dev/hello:0')
-        self.binary('1',path='usr/bin/hello1'); self.run_core('DEP_MODE=auto; corix_install dev/hello:1')
+        self.binary('1',version=2,path='usr/bin/hello1'); self.run_core('DEP_MODE=auto; corix_install dev/hello:1')
         self.assertTrue((self.root/'usr/bin/hello0').exists()); self.assertTrue((self.root/'usr/bin/hello1').exists())
         self.run_core('corix_remove dev/hello:0 <<< y')
         self.assertFalse((self.root/'usr/bin/hello0').exists()); self.assertTrue((self.root/'usr/bin/hello1').exists())

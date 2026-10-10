@@ -561,6 +561,115 @@ _end_transaction() {
     trap - RETURN
 }
 
+# Persist transaction ownership and backups before modifying installation state.
+_internal_fs_transaction_context() {
+    [ -n "$CORIUM_FS_TX_DIR" ] || return 1
+    local tx_db tx_args=()
+    for tx_db in "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB"; do
+        [ -z "${CORIUM_DB_TX_BACKUPS[$tx_db]:-}" ] || tx_args+=("$tx_db" "${CORIUM_DB_TX_BACKUPS[$tx_db]}")
+    done
+    "${PYTHON_CMD}" - "$CORIUM_FS_TX_DIR" "$1" "$BASHPID" "$CORIUM_ROOT" "$INSTALLED_DB" "$CURRENT_TRANSACTION_BACKUP_PATH" "$WORLD_FILE" "${tx_args[@]}" <<'PY_FS_CONTEXT'
+import json,os,pathlib,sys
+folder,phase,pid,root,installed,backup,world=sys.argv[1:8]
+folder=pathlib.Path(folder)
+if phase=='committed':
+    previous=json.loads((folder/'context.json').read_text())
+    if previous['pid']!=int(pid): raise ValueError('Filesystem transaction owner mismatch')
+context={'phase':phase,'pid':int(pid),'start':pathlib.Path('/proc/'+pid+'/stat').read_text().rsplit(')',1)[1].split()[19],
+         'boot':pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+         'root':str(pathlib.Path(root).resolve()),'installed':installed,'installed_backup':backup,'world':world,
+         'databases':list(zip(sys.argv[8::2],sys.argv[9::2]))}
+# Original backups must reach storage before callers overwrite their counterparts.
+paths=[folder,pathlib.Path(backup)] if phase=='prepared' else [pathlib.Path(installed)]
+files=[pathlib.Path(world)]+[pathlib.Path(p) for pair in context['databases'] for p in pair]
+if phase=='committed' and (folder/'journal.json').exists():
+    files += [pathlib.Path(context['root'])/name for name in json.loads((folder/'journal.json').read_text())]
+for tree in paths:
+    if tree.exists():
+        for parent,dirs,names in os.walk(tree):
+            files += [pathlib.Path(parent)/name for name in names]
+            files.append(pathlib.Path(parent))
+for path in files:
+    if path.exists() and not path.is_symlink():
+        fd=os.open(path,os.O_RDONLY)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+        fd=os.open(path.parent,os.O_RDONLY)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+next_file=folder/'context.next'
+with next_file.open('w') as stream:
+    json.dump(context,stream); stream.flush(); os.fsync(stream.fileno())
+os.replace(next_file,folder/'context.json')
+fd=os.open(folder,os.O_RDONLY)
+try: os.fsync(fd)
+finally: os.close(fd)
+PY_FS_CONTEXT
+}
+
+# On a cold restart, restore only abandoned journals; live transactions retain ownership.
+_internal_recover_abandoned_transactions() {
+    [ -d "$LOCK_DIR" ] || return 0
+    local journals=()
+    while IFS= read -r -d '' journal; do journals+=("$journal"); done < <(find "$LOCK_DIR" -maxdepth 2 -name context.json -path '*/filesystem-tx.*/*' -print0)
+    [ ${#journals[@]} -gt 0 ] || return 0
+    "${PYTHON_CMD}" - "$CORIUM_ROOT" "$LOCK_DIR" "${journals[@]}" <<'PY_FS_RECOVER'
+import fcntl,json,os,pathlib,shutil,sqlite3,sys
+root=pathlib.Path(sys.argv[1]).resolve(); lockdir=pathlib.Path(sys.argv[2])
+boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+def inside(value):
+    path=pathlib.Path(value)
+    if not path.is_absolute() or not path.resolve().is_relative_to(root): raise ValueError('Invalid transaction recovery path')
+    return path
+with (lockdir/'recovery.lock').open('a') as lock:
+    fcntl.flock(lock,fcntl.LOCK_EX)
+    for filename in sys.argv[3:]:
+        journal=pathlib.Path(filename)
+        if not journal.exists(): continue
+        data=json.loads(journal.read_text()); folder=inside(str(journal.parent))
+        if data['root']!=str(root): raise ValueError('Transaction recovery root mismatch')
+        stat=pathlib.Path('/proc/'+str(data['pid'])+'/stat')
+        try:
+            if data['boot']==boot and stat.read_text().rsplit(')',1)[1].split()[19]==data['start']: continue
+        except FileNotFoundError: pass
+        installed=inside(data['installed']); backup=inside(data['installed_backup']); world=inside(data['world'])
+        databases=[(inside(path),inside(saved)) for path,saved in data['databases']]
+        if data['phase']!='committed':
+            entries=json.loads((folder/'journal.json').read_text()) if (folder/'journal.json').exists() else {}
+            for name,item in sorted(entries.items(),key=lambda x:-len(pathlib.PurePosixPath(x[0]).parts)):
+                relative=pathlib.PurePosixPath(name)
+                if relative.is_absolute() or '..' in relative.parts: raise ValueError('Invalid recovery manifest')
+                target=root/relative
+                for parent in target.parents:
+                    if parent==root: break
+                    if parent.is_symlink(): raise ValueError('Symlink in recovery parent')
+                if item.get('directory'): continue
+                if os.path.lexists(target):
+                    if target.is_dir() and not target.is_symlink(): target.rmdir()
+                    else: target.unlink()
+                if item['exists']:
+                    target.parent.mkdir(parents=True,exist_ok=True)
+                    if 'link' in item: target.symlink_to(item['link'])
+                    else: shutil.copy2(inside(str(folder/item['backup'])),target)
+            shutil.copy2(folder/'world',world)
+            if installed.exists(): shutil.rmtree(installed)
+            # Keep the original backup until all databases have been restored.
+            shutil.copytree(backup,installed)
+            for path,saved in databases:
+                if saved.stat().st_size:
+                    source=sqlite3.connect(saved.resolve().as_uri()+'?mode=ro',uri=True)
+                    destination=sqlite3.connect(path)
+                    try: source.backup(destination)
+                    finally: source.close(); destination.close()
+                else:
+                    for suffix in ('','-wal','-shm'): pathlib.Path(str(path)+suffix).unlink(missing_ok=True)
+            print('Recovered abandoned Corium transaction: '+str(folder),file=sys.stderr)
+        for path,saved in databases: saved.unlink(missing_ok=True)
+        if backup.exists(): shutil.rmtree(backup)
+        shutil.rmtree(folder)
+PY_FS_RECOVER
+}
+
 # 开始一个事务
 # Begins a transaction
 _begin_transaction() {
@@ -582,15 +691,16 @@ _begin_transaction() {
     CORIUM_FS_TX_DIR=$(mktemp -d "${LOCK_DIR}/filesystem-tx.XXXXXX") || return 1
     export WORLD_FILE
     cp -a "$WORLD_FILE" "$CORIUM_FS_TX_DIR/world" || return 1
-    for tx_db in "$BLOCKCHAIN_DB" "$DHT_DB"; do
-        [ ! -f "$tx_db" ] || db_begin_transaction "$tx_db"
+    for tx_db in "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB"; do
+        [ ! -f "$tx_db" ] || db_begin_transaction "$tx_db" || return 1
     done
     
     # 设置全局状态
     CURRENT_TRANSACTION_BACKUP_PATH="$backup_dir"
     CORIUM_FS_TX_DEPTH=1
     TRANSACTION_SUCCESSFUL=0
-    
+    _internal_fs_transaction_context prepared || return 1
+
     # Do not install a RETURN trap here: RETURN fires when _begin_transaction
     # itself returns, which would end the transaction immediately. Failed callers
     # deliberately leave the backup in place for recovery; successful callers
@@ -600,7 +710,8 @@ _begin_transaction() {
 # Mark and finalize a successful filesystem transaction.
 _commit_transaction() {
     if [ "$CORIUM_FS_TX_DEPTH" -gt 1 ]; then ((CORIUM_FS_TX_DEPTH-=1)); return 0; fi
-    db_commit_transaction "$BLOCKCHAIN_DB" "$DHT_DB"
+    _internal_fs_transaction_context committed || return 1
+    db_commit_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB"
     [ -z "$CORIUM_FS_TX_DIR" ] || rm -rf -- "$CORIUM_FS_TX_DIR"
     CORIUM_FS_TX_DIR=""
     CORIUM_FS_TX_DEPTH=0
@@ -645,6 +756,11 @@ for name in pathlib.Path(sys.argv[3]).read_text().splitlines():
     with tmp.open('w') as f:
         json.dump(entries, f, ensure_ascii=False); f.flush(); os.fsync(f.fileno())
     os.replace(tmp, journal)
+    for original in tx.glob('*.original'):
+        with original.open('rb') as stream: os.fsync(stream.fileno())
+    fd=os.open(tx,os.O_RDONLY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
 PY_FS_STAGE
 }
 
@@ -3252,7 +3368,7 @@ def discover_public_address():
             # We directly call the version with arguments, which is most likely to succeed.
             # 源码显示它需要一个 socket 对象 's'，但通常可以传 None 让它自己创建。
             # The source shows it needs a socket object 's', but passing None often lets it create its own.
-            nat_type, external_ip, external_port = pystun3.get_nat_type(s=None, source_ip='0.0.0.0', source_port=0, stun_host=host, stun_port=port)
+            nat_type, external_ip, external_port = pystun3.get_ip_info(source_ip='0.0.0.0', source_port=0, stun_host=host, stun_port=port)
             
             if external_ip and external_port:
                 PUBLIC_IP, PUBLIC_PORT, NAT_TYPE = external_ip, external_port, nat_type
@@ -6222,6 +6338,21 @@ _validate_single_transaction() {
                 reorg_cache["$tx_hash"]="invalid"; return 1
             fi
             
+            if [[ "$engine_id" == "corium/internal-engine-zero-v1" ]]; then
+                "${PYTHON_CMD}" - "$tx_payload" "$sender_id" "$CORIUM_NETWORK_ID" "$BLOCKCHAIN_DB" <<'PY_ENGINE_ZERO'
+import hashlib,json,re,sqlite3,sys
+payload=json.loads(sys.argv[1]); proof=payload.get('proof_data',{})
+if not isinstance(proof,dict) or proof.get('submitter_id')!=sys.argv[2] or proof.get('network_id')!=sys.argv[3]: raise ValueError('Engine Zero proof identity/network mismatch')
+nonce=str(proof.get('nonce','')); problem=payload.get('problem_id','')
+if not re.fullmatch('[0-9]{1,20}',nonce) or not re.fullmatch('[a-f0-9]{64}',problem): raise ValueError('Invalid Engine Zero proof fields')
+with sqlite3.connect(sys.argv[4]) as db:
+    if not db.execute('SELECT 1 FROM blocks WHERE hash=?',(problem,)).fetchone(): raise ValueError('Unknown Engine Zero challenge')
+digest=hashlib.sha256((sys.argv[3]+sys.argv[2]+nonce+problem).encode()).hexdigest()
+if not digest.startswith('000'): raise ValueError('Invalid Engine Zero nonce')
+PY_ENGINE_ZERO
+                [ $? -eq 0 ] || return 1
+            fi
+
             # [Batch 4] 防御恶意 Compute Engine/Verifier 篡改
             if [[ "$engine_id" != "corium/internal-engine-zero"* ]]; then
                 local onchain_engine_hash onchain_verifier_hash proof_engine_hash proof_verifier_hash
@@ -7581,7 +7712,9 @@ def verify_object_file(path, expected, chain_path):
     from cryptography.hazmat.primitives import serialization,hashes
     from cryptography.hazmat.primitives.asymmetric import ec
     with open(path,'rb') as file:
-        raw_hash=hashlib.file_digest(file,'sha256').hexdigest()
+        digest=hashlib.sha256()
+        for chunk in iter(lambda:file.read(1048576),b''): digest.update(chunk)
+        raw_hash=digest.hexdigest()
     if raw_hash==expected: return True
     content=pathlib.Path(path).read_bytes()
     # Existing identity IDs omit the PEM trailing newline.
@@ -8532,14 +8665,14 @@ corix_strata_create() {
             local debian_mirror="${3:-http://deb.debian.org/debian/}"
             local debian_release="${4:-stable}"
             
-            debootstrap "$debian_release" "$strata_path" "$debian_mirror"
+            debootstrap "$debian_release" "$strata_path" "$debian_mirror" || return 1
             
             # Configure apt sources
             cat > "${strata_path}/etc/apt/sources.list" <<EOF
 deb $debian_mirror $debian_release main
 deb-src $debian_mirror $debian_release main
-deb $debian_mirror ${debian_release}-security main
-deb-src $debian_mirror ${debian_release}-security main
+deb https://security.debian.org/debian-security ${debian_release}-security main
+deb-src https://security.debian.org/debian-security ${debian_release}-security main
 EOF
             
             # Update package database
@@ -8573,26 +8706,37 @@ EOF
             rpm --root "$strata_path" --initdb
             
             # Install base system
+            local fedora_repo="$strata_path/etc/yum.repos.d"
+            mkdir -p "$fedora_repo"
+            cat > "$fedora_repo/fedora.repo" <<EOF_FEDORA
+[fedora]
+name=Fedora $fedora_release
+metalink=https://mirrors.fedoraproject.org/metalink?repo=fedora-$fedora_release&arch=\$basearch
+enabled=1
+gpgcheck=1
+gpgkey=https://src.fedoraproject.org/rpms/fedora-repos/raw/rawhide/f/RPM-GPG-KEY-fedora-$fedora_release-primary
+EOF_FEDORA
             dnf --installroot="$strata_path" --releasever="$fedora_release" \
-                install -y filesystem setup basesystem
+                --setopt=reposdir="$fedora_repo" install -y filesystem setup basesystem bash fedora-release || return 1
             ;;
             
         portage|gentoo)
             info "Creating Gentoo-based strata with Portage..."
             
             # Download stage3 tarball
-            local stage3_url="https://distfiles.gentoo.org/releases/amd64/autobuilds/latest-stage3-amd64.txt"
+            local stage3_url="https://distfiles.gentoo.org/releases/amd64/autobuilds/latest-stage3-amd64-openrc.txt"
             local stage3_path
-            stage3_path=$(curl -s "$stage3_url" | grep -v '^#' | head -n1 | awk '{print $1}')
+            stage3_path=$(curl --fail --location --silent --show-error "$stage3_url" | awk '!/^#/ && $1 ~ /^[0-9].*stage3.*\.tar\.xz$/ {print $1; exit}') || return 1
+            [[ "$stage3_path" =~ ^[0-9A-Za-z._/-]+\.tar\.xz$ ]] && [[ "$stage3_path" != *..* ]] || return 1
             local stage3_file="${stage3_path##*/}"
             local stage3_full_url="https://distfiles.gentoo.org/releases/amd64/autobuilds/$stage3_path"
             
             info "Downloading stage3: $stage3_file"
-            curl -L -o "${SOURCE_CACHE}/$stage3_file" "$stage3_full_url"
+            curl --fail --location --retry 3 -o "${SOURCE_CACHE}/$stage3_file" "$stage3_full_url" || return 1
             
             # Extract stage3
             mkdir -p "$strata_path"
-            tar -xpf "${SOURCE_CACHE}/$stage3_file" -C "$strata_path"
+            tar -xpf "${SOURCE_CACHE}/$stage3_file" -C "$strata_path" || return 1
             ;;
             
         *)
@@ -9227,64 +9371,68 @@ PY_IDENTITY_LOOKUP
 # @return A JSON object containing the encrypted data, base64 encoded.
 #         返回一个包含加密数据的 JSON 对象 (Base64编码)。
 _e2ee_encrypt_payload() {
-    local plaintext="$1"
-    local recipient_pubkey_file="$2"
-
-    # 1. Generate a one-time symmetric session key and IV.
-    # 1. 生成一次性的对称会话密钥和初始化向量(IV)。
-    local session_key iv
-    session_key=$(openssl rand -hex 32) # AES-256 key
-    iv=$(openssl rand -hex 16)          # AES IV
-
-    # 2. Encrypt the plaintext with the session key.
-    # 2. 用会话密钥加密明文。
-    local encrypted_payload_b64
-    encrypted_payload_b64=$(echo -n "$plaintext" | openssl enc -aes-256-cbc -K "$session_key" -iv "$iv" | base64 -w0)
-
-    # 3. Encrypt the session key and IV with the recipient's public key.
-    # 3. 用接收者的公钥加密会话密钥和IV。
-    local encrypted_session_key_b64
-    encrypted_session_key_b64=$(echo -n "${session_key}:${iv}" | openssl pkeyutl -encrypt -pubin -inkey "$recipient_pubkey_file" | base64 -w0)
-
-    # 4. Assemble the final JSON object.
-    # 4. 组装最终的 JSON 对象。
-    jq -n \
-        --arg esk "$encrypted_session_key_b64" \
-        --arg ep "$encrypted_payload_b64" \
-        '{encrypted_session_key: $esk, encrypted_payload: $ep}'
+    [ $# -eq 2 ] || return 1
+    "${PYTHON_CMD}" - "$1" "$2" <<'PY_E2EE_ENCRYPT'
+import base64,json,os,sys
+from cryptography.hazmat.primitives import hashes,serialization,padding
+from cryptography.hazmat.primitives.asymmetric import ec,rsa,padding as asymmetric_padding
+from cryptography.hazmat.primitives.ciphers import Cipher,algorithms,modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+public=serialization.load_pem_public_key(open(sys.argv[2],'rb').read())
+plaintext=sys.argv[1].encode()
+if isinstance(public,ec.EllipticCurvePublicKey):
+    ephemeral=ec.generate_private_key(public.curve)
+    shared=ephemeral.exchange(ec.ECDH(),public)
+    key=HKDF(algorithm=hashes.SHA256(),length=32,salt=None,info=b'CORIUM-E2EE-V1').derive(shared)
+    nonce=os.urandom(12)
+    pem=ephemeral.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+    result={'scheme':'ecdh-aes256gcm-v1','ephemeral_public_key':pem,'nonce':nonce.hex(),
+            'encrypted_payload':base64.b64encode(AESGCM(key).encrypt(nonce,plaintext,b'CORIUM-E2EE-V1')).decode()}
+elif isinstance(public,rsa.RSAPublicKey):
+    # Retain the existing RSA envelope so old clients and stored mail remain readable.
+    key=os.urandom(32); iv=os.urandom(16)
+    padder=padding.PKCS7(128).padder(); padded=padder.update(plaintext)+padder.finalize()
+    encryptor=Cipher(algorithms.AES(key),modes.CBC(iv)).encryptor()
+    payload=encryptor.update(padded)+encryptor.finalize()
+    wrapped=public.encrypt((key.hex()+':'+iv.hex()).encode(),asymmetric_padding.PKCS1v15())
+    result={'encrypted_session_key':base64.b64encode(wrapped).decode(),'encrypted_payload':base64.b64encode(payload).decode()}
+else: raise ValueError('Unsupported recipient encryption key')
+print(json.dumps(result,ensure_ascii=False,separators=(',',':')))
+PY_E2EE_ENCRYPT
 }
 
-# ==============================================================================
-# --- [NEW E2EE FUNCTION] 端到端解密荷载                             ---
-# --- [NEW E2EE FUNCTION] End-to-End Decrypt a Payload               ---
-# ==============================================================================
-# Decrypts a payload that was encrypted with our public key.
-# 解密一个用我们的公钥加密的荷载。
-#
-# @param $1 - encrypted_json (The JSON object from P2P / 来自P2P的JSON对象)
-# @return The original plaintext. / 原始的明文。
 _e2ee_decrypt_payload() {
-    local encrypted_json="$1"
-
-    # 1. Parse the JSON object.
-    # 1. 解析 JSON 对象。
-    local encrypted_session_key_b64 encrypted_payload_b64
-    encrypted_session_key_b64=$(echo "$encrypted_json" | jq -r .encrypted_session_key)
-    encrypted_payload_b64=$(echo "$encrypted_json" | jq -r .encrypted_payload)
-    [ -z "$encrypted_session_key_b64" ] || [ -z "$encrypted_payload_b64" ] && { echo "[解密失败: 格式无效 / Decryption failed: Invalid format]"; return 1; }
-
-    # 2. Decrypt the session key with our private key.
-    # 2. 用我们的私钥解密会话密钥。
-    local session_key_and_iv
-    session_key_and_iv=$(echo "$encrypted_session_key_b64" | base64 -d | openssl pkeyutl -decrypt -inkey "$USER_IDENTITY_FILE" 2>/dev/null)
-    [ -z "$session_key_and_iv" ] && { echo "[解密失败: 密钥无效或您不是接收者 / Decryption failed: Invalid key or not the recipient]"; return 1; }
-    
-    local session_key="${session_key_and_iv%:*}"
-    local iv="${session_key_and_iv#*:}"
-
-    # 3. Decrypt the payload with the session key.
-    # 3. 用会话密钥解密荷载。
-    echo "$encrypted_payload_b64" | base64 -d | openssl enc -d -aes-256-cbc -K "$session_key" -iv "$iv"
+    [ $# -eq 1 ] || return 1
+    "${PYTHON_CMD}" - "$1" "$USER_IDENTITY_FILE" <<'PY_E2EE_DECRYPT'
+import base64,json,sys
+from cryptography.hazmat.primitives import hashes,serialization,padding
+from cryptography.hazmat.primitives.asymmetric import ec,rsa,padding as asymmetric_padding
+from cryptography.hazmat.primitives.ciphers import Cipher,algorithms,modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+try:
+    envelope=json.loads(sys.argv[1]); private=serialization.load_pem_private_key(open(sys.argv[2],'rb').read(),password=None)
+    payload=base64.b64decode(envelope['encrypted_payload'],validate=True)
+    if envelope.get('scheme')=='ecdh-aes256gcm-v1':
+        peer=serialization.load_pem_public_key(envelope['ephemeral_public_key'].encode())
+        if not isinstance(private,ec.EllipticCurvePrivateKey) or not isinstance(peer,ec.EllipticCurvePublicKey) or private.curve.name!=peer.curve.name:
+            raise ValueError('Invalid recipient or ephemeral key')
+        shared=private.exchange(ec.ECDH(),peer)
+        key=HKDF(algorithm=hashes.SHA256(),length=32,salt=None,info=b'CORIUM-E2EE-V1').derive(shared)
+        plaintext=AESGCM(key).decrypt(bytes.fromhex(envelope['nonce']),payload,b'CORIUM-E2EE-V1')
+    else:
+        if not isinstance(private,rsa.RSAPrivateKey): raise ValueError('Invalid legacy recipient key')
+        wrapped=base64.b64decode(envelope['encrypted_session_key'],validate=True)
+        key,iv=private.decrypt(wrapped,asymmetric_padding.PKCS1v15()).decode().split(':')
+        decryptor=Cipher(algorithms.AES(bytes.fromhex(key)),modes.CBC(bytes.fromhex(iv))).decryptor()
+        padded=decryptor.update(payload)+decryptor.finalize()
+        unpadder=padding.PKCS7(128).unpadder(); plaintext=unpadder.update(padded)+unpadder.finalize()
+    sys.stdout.write(plaintext.decode())
+except Exception:
+    print('[解密失败: 密钥或内容无效 / Decryption failed: Invalid key or payload]')
+    sys.exit(1)
+PY_E2EE_DECRYPT
 }
 
 # =======================================================
@@ -14620,18 +14768,20 @@ _execute_mod_in_sandbox() {
     local file_manifest; file_manifest=$(db_get_package_files "$pkg_name_full" "$PKG_SLOT")
 
     if [[ -n "$file_manifest" ]]; then
-        echo "$file_manifest" | while IFS= read -r file_entry; do
+        while IFS= read -r file_entry; do
             [ -n "$file_entry" ] || continue
             local full_path="${CORIUM_ROOT%/}/${file_entry}"
             [ -e "$full_path" ] && bwrap_args+=(--ro-bind "$full_path" "$full_path")
-        done
+        done <<< "$file_manifest"
     else
         warn "[SANDBOX] 警告：无法获取 Mod '${pkg_id}' 的文件清单。/ WARNING: Could not get file manifest for Mod '${pkg_id}'."
     fi
 
     # --- 3b. 绑定一个最小化的、只读的基础系统环境 ---
     # --- 3b. Bind a minimal, read-only base system environment ---
-    bwrap_args+=(--ro-bind /usr /usr)
+    bwrap_args+=(--ro-bind /usr /usr --ro-bind /bin /bin)
+    # Downloaded, hash-verified compute executables may be outside installed manifests.
+    bwrap_args+=(--ro-bind "$executable_path" "$executable_path")
     [ -d /lib ] && bwrap_args+=(--ro-bind /lib /lib)
     [ -d /lib64 ] && bwrap_args+=(--ro-bind /lib64 /lib64)
     
@@ -14697,9 +14847,9 @@ _execute_mod_in_sandbox() {
     # 注意：此函数不使用 timeout 命令，超时应由调用者（如 _run_hooks）处理
     # Note: This function does not use the timeout command; timeouts should be handled by the caller (e.g., _run_hooks)
     local -a final_command=(
-        "prlimit"
-        "--cpu=${cpu_limit}" "--nproc=50" "--as=$((memory_limit * 1024 * 1024))"
-        "bwrap" "${bwrap_args[@]}" "$executable_path" "${args[@]}"
+        "bwrap" "${bwrap_args[@]}"
+        "prlimit" "--cpu=${cpu_limit}" "--nproc=50" "--as=$((memory_limit * 1024 * 1024))"
+        "$executable_path" "${args[@]}"
     )
     
     local cmd_str="${final_command[*]}"
@@ -15013,7 +15163,7 @@ corix_build() {
         verification_script_body+="
 echo '--> [TOCTOU FIX] Verifying source file: ${filename} inside sandbox...'
 actual_sum=\$(sha256sum \"\${srcdir}/${filename}\" 2>/dev/null | awk '{print \$1}')
-if [ \\\"\$actual_sum\\\" != \\\"${expected_sum}\\\" ]; then
+if [ \"\$actual_sum\" != \"${expected_sum}\" ]; then
     echo '!!! [FATAL SECURITY ERROR] Source file corruption or tampering detected inside sandbox!' >&2
     exit 126
 fi
@@ -15024,7 +15174,7 @@ fi
 #!/bin/bash
 set -e
 export srcdir="\$(pwd)"
-export pkgdir="$pkg_dir"
+export pkgdir="/pkg"
 export MAKEFLAGS="-j\${BUILD_JOBS}"
 
 echo "--- [DEBUG] INSIDE SANDBOX ---"
@@ -15202,7 +15352,7 @@ EOF
     
     local build_hash
     build_hash=$(calculate_hash "$build_file")
-    blockchain_register_package "$pkg_name" "$pkgver" "$pkg_hash" "$build_hash" >/dev/null
+    blockchain_register_package "$pkg_name_full" "$pkgver" "$pkg_hash" "$build_hash" >/dev/null
     
     info "Sharing binary package via P2P network... / 正在通过P2P网络共享二进制包..."
     p2p_split_file "$binary_pkg_path" >/dev/null || true
@@ -15736,8 +15886,9 @@ _get_mod_metadata_value() {
     local key_to_find="$2"
     
     local build_file
-    build_file=$(find_package_build_file "$pkg_id")
-    [ -z "$build_file" ] || [ ! -f "$build_file" ] && return 1
+    [ -d "$REPOS_CONF_DIR" ] || return 0
+    build_file=$(find_package_build_file "$pkg_id") || return 0
+    [ -z "$build_file" ] || [ ! -f "$build_file" ] && return 0
 
     # Call the new parser and grep for the specific key.
     # The output will be in the format "key=value1 value2 ...".
@@ -16660,7 +16811,7 @@ corix_strata_execute() {
     fi
 
     case "$tool" in
-        bwrap)
+        bwrap|bubblewrap)
             check_dep bwrap
             # Ensure minimal FS layout exists
             mkdir -p "${strata_path}"/{proc,sys,dev,run,tmp,var,tmp/root,root}
@@ -16819,7 +16970,7 @@ corix_strata_destroy() {
     fi
 
     # Remove
-    rm -rf --one-file-system "${strata_path:?Error: strata_path variable is unset or empty}"q
+    rm -rf --one-file-system "${strata_path:?Error: strata_path variable is unset or empty}"
 
     info "Strata '$name' removed."
 }
@@ -16848,7 +16999,7 @@ corix_strata_export_pkgs() {
             # -W 显示包, -f 指定格式。'${Package}\n' 给出干净的列表。
             # We filter out essential packages that are always part of the base system.
             # 我们过滤掉那些总是作为基础系统一部分的核心包。
-            list_cmd="dpkg-query -W -f='${Package}\n' | grep -vE '^(apt|base-files|base-passwd|bash|coreutils|dash|debconf|debian-archive-keyring|debianutils|diffutils|dpkg|e2fsprogs|findutils|grep|gzip|hostname|init-system-helpers|login|mount|ncurses-base|ncurses-bin|perl-base|sed|sysvinit-utils|tar|util-linux)$'"
+            list_cmd="dpkg-query -W -f='\${Package}\n' | grep -vE '^(apt|base-files|base-passwd|bash|coreutils|dash|debconf|debian-archive-keyring|debianutils|diffutils|dpkg|e2fsprogs|findutils|grep|gzip|hostname|init-system-helpers|login|mount|ncurses-base|ncurses-bin|perl-base|sed|sysvinit-utils|tar|util-linux)$'"
             ;;
         pacman|arch)
             # -Q lists installed packages, -q makes it quiet (name only).
@@ -21592,11 +21743,15 @@ PY_SAVE_BLOCKS
 # Serialize named tables with complete type boundaries and stable row ordering.
 # 对表名、字段、类型和行顺序作规范序列化，避免分隔符与插入顺序影响状态根。
 _internal_semantic_state() {
-    "${PYTHON_CMD}" - "$BLOCKCHAIN_DB" "$FORUM_DB" <<'PY_STATE'
-import sqlite3, json, sys, pathlib
+    "${PYTHON_CMD}" - "$BLOCKCHAIN_DB" "$FORUM_DB" "$SCRIPT_PATH" <<'PY_STATE'
+import sqlite3, json, sys, pathlib, re
 state = {}
+custom_schemas={}
+builtin=set(re.findall(r'CREATE TABLE IF NOT EXISTS\s+([A-Za-z_][A-Za-z_0-9]*)',pathlib.Path(sys.argv[3]).read_text()))
+def cell(value):
+    return {'$corium_blob':value.hex()} if isinstance(value,bytes) else value
 local_tables = {'subscriptions','aliases','local_user_blocks','objects','topics','posts','cbb_messages','exodus_proposals','exodus_notarizations','agent_emergency_queue'}
-for label, path in zip(('chain','application'),sys.argv[1:]):
+for label, path in zip(('chain','application'),sys.argv[1:3]):
     db = sqlite3.connect(pathlib.Path(path).resolve().as_uri()+'?mode=ro', uri=True)
     if db.execute('PRAGMA integrity_check').fetchall()!=[('ok',)]: raise ValueError('Corrupted state database')
     tables = {}
@@ -21606,7 +21761,9 @@ for label, path in zip(('chain','application'),sys.argv[1:]):
         query = 'SELECT * FROM "'+table.replace('"','""')+'"'
         if table == 'transactions': query += ' WHERE block_height IS NOT NULL'
         if table == 'chain_state': query += " WHERE key='core_gpg_authority'"
-        rows = [dict(zip(columns,row)) for row in db.execute(query)]
+        rows = [dict(zip(columns,map(cell,row))) for row in db.execute(query)]
+        if table not in builtin:
+            custom_schemas.setdefault(label,{})[table]=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone()[0]
         if table == 'chain_state' and not rows: continue
         if table in ('messages','mails'):
             for row in rows:
@@ -21614,6 +21771,7 @@ for label, path in zip(('chain','application'),sys.argv[1:]):
         tables[table] = sorted(rows,key=lambda row: json.dumps(row,sort_keys=True,ensure_ascii=False,separators=(',',':')))
     state[label] = tables
     db.close()
+if custom_schemas: state['_custom_schemas']=custom_schemas
 print(json.dumps(state,sort_keys=True,ensure_ascii=False,separators=(',',':')))
 PY_STATE
 }
@@ -21644,6 +21802,11 @@ pem=snapshot['snapshot_public_key']; key=load_pem_public_key(pem.encode())
 if not isinstance(key,ec.EllipticCurvePublicKey) or not isinstance(key.curve,ec.SECP256K1): raise ValueError('Invalid snapshot key')
 key.verify(bytes.fromhex(signature),root.encode(),ec.ECDSA(hashes.SHA256()))
 state=snapshot['state']; chain=state['chain_tables']; application=state['application_tables']
+custom_schemas=state.get('custom_schemas',{})
+if not isinstance(custom_schemas,dict) or set(custom_schemas)-{'chain','application'}: raise ValueError('Invalid custom schemas')
+def decoded(value):
+    if isinstance(value,dict) and set(value)=={'$corium_blob'}: return bytes.fromhex(value['$corium_blob'])
+    return value
 identity=hashlib.sha256(pem.rstrip('\n').encode()).hexdigest()
 if not any(v['public_key_hash']==identity and v['public_key'].rstrip('\n')==pem.rstrip('\n') for v in chain['validators']):
     raise ValueError('Snapshot signer is not a recovered validator')
@@ -21652,7 +21815,16 @@ if type(anchor['height']) is not int or anchor['height']<0 or not re.fullmatch('
 # Validate all tables, field names and scalar types against the actual v108 schemas.
 dbs=[sqlite3.connect(sys.argv[2]),sqlite3.connect(sys.argv[3])]
 try:
-    for db,tables in zip(dbs,(chain,application)):
+    for label,db,tables in zip(('chain','application'),dbs,(chain,application)):
+        schemas=custom_schemas.get(label,{})
+        if not isinstance(schemas,dict): raise ValueError('Invalid custom schema mapping')
+        for table,sql in schemas.items():
+            if not re.fullmatch('[A-Za-z_][A-Za-z_0-9]*',table) or not isinstance(sql,str): raise ValueError('Invalid custom schema name')
+            if not re.match(r'^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`\[]?'+re.escape(table)+r'["`\]]?\s*\(',sql,re.I): raise ValueError('Invalid custom CREATE TABLE')
+            if table not in tables: raise ValueError('Custom schema has no recovered table')
+            existing=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone()
+            if existing and existing[0]!=sql: raise ValueError('Custom schema differs from recovered table')
+            if not existing: db.execute(sql)
         available={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         if not isinstance(tables,dict): raise ValueError('Malformed recovered tables')
         excluded={'blocks','transactions','chain_state','staged_blocks'} if db is dbs[0] else {'subscriptions','aliases','local_user_blocks','objects','topics','posts','cbb_messages','exodus_proposals','exodus_notarizations','agent_emergency_queue'}
@@ -21673,6 +21845,8 @@ try:
                         if fields[name][3]: raise ValueError('NULL recovery field')
                     elif 'INT' in kind:
                         if type(value) is not int or not -2**63<=value<2**63: raise ValueError('Invalid recovery integer')
+                    elif 'BLOB' in kind and isinstance(value,dict) and set(value)=={'$corium_blob'}:
+                        if not isinstance(value['$corium_blob'],str) or not re.fullmatch('(?:[a-f0-9]{2})*',value['$corium_blob']): raise ValueError('Invalid recovery blob')
                     elif not isinstance(value,str): raise ValueError('Invalid recovery string')
     validators=snapshot['validators']; seen=set()
     if not isinstance(validators,list) or not validators: raise ValueError('Missing validators')
@@ -21698,7 +21872,7 @@ try:
             for row in rows:
                 if row:
                     fields=list(row)
-                    db.execute('INSERT INTO '+label+'."'+table+'" ('+','.join('"'+n+'"' for n in fields)+') VALUES ('+','.join('?' for n in fields)+')',tuple(row[n] for n in fields))
+                    db.execute('INSERT INTO '+label+'."'+table+'" ('+','.join('"'+n+'"' for n in fields)+') VALUES ('+','.join('?' for n in fields)+')',tuple(decoded(row[n]) for n in fields))
     db.execute('DELETE FROM validators')
     for v in validators:
         public=v['public_key'].rstrip('\n'); ident=hashlib.sha256(public.encode()).hexdigest()
@@ -21741,15 +21915,21 @@ _internal_rebuild_derived_state() {
     "${PYTHON_CMD}" - "$replay_dir/state.json" "$BLOCKCHAIN_DB" "$FORUM_DB" "$height" <<'PY_REBUILD'
 import sqlite3,json,sys
 state=json.load(open(sys.argv[1])); db=sqlite3.connect(sys.argv[2]); db.execute('ATTACH DATABASE ? AS app',(sys.argv[3],))
+def decoded(value):
+    return bytes.fromhex(value['$corium_blob']) if isinstance(value,dict) and set(value)=={'$corium_blob'} else value
 try:
     db.execute('BEGIN IMMEDIATE')
     for label,tables in (('main',state['chain']),('app',state['application'])):
+        schemas=state.get('_custom_schemas',{}).get('chain' if label=='main' else 'application',{})
+        for table,sql in schemas.items():
+            existing=db.execute("SELECT sql FROM "+label+".sqlite_master WHERE type='table' AND name=?",(table,)).fetchone()
+            if not existing: db.execute(sql if label=='main' else sql.replace('CREATE TABLE ', 'CREATE TABLE app.',1))
         for table,rows in tables.items():
             if table in ('blocks','transactions'): continue
             db.execute('DELETE FROM '+label+'."'+table+'"')
             for row in rows:
                 fields=list(row)
-                db.execute('INSERT INTO '+label+'."'+table+'" ('+','.join('"'+f+'"' for f in fields)+') VALUES ('+','.join('?' for f in fields)+')',tuple(row[f] for f in fields))
+                db.execute('INSERT INTO '+label+'."'+table+'" ('+','.join('"'+f+'"' for f in fields)+') VALUES ('+','.join('?' for f in fields)+')',tuple(decoded(row[f]) for f in fields))
     db.execute("INSERT OR REPLACE INTO chain_state VALUES ('last_processed_height',?)",(sys.argv[4],))
     tip=db.execute('SELECT hash,height FROM blocks ORDER BY height DESC LIMIT 1').fetchone()
     db.execute("INSERT OR REPLACE INTO chain_state VALUES ('chain_info',?)",(tip[0]+'|'+str(tip[1]),))
@@ -21797,6 +21977,7 @@ result={'format':'CORIUM_PHOENIX_GENESIS_V2','validators':validators,
                  'groups':[dict(id=r['id_hash'],nickname=r['nickname'],permissions=json.loads(r['permissions'])) for r in app['identity_cache'] if r['type']=='group'],
                  'acls':[dict(r,permissions=json.loads(r['permissions'])) for r in app['acl_state']],
                  'packages':[], 'chain_tables':{k:v for k,v in chain.items() if k not in ('blocks','transactions')}, 'application_tables':app}}
+if state.get('_custom_schemas'): result['state']['custom_schemas']=state['_custom_schemas']
 # Only canonical package registrations belong to the recovery history. Installed local packages do not.
 for tx in sorted(chain['transactions'],key=lambda row:(row['block_height'],row['hash'])):
     if tx['type']=='package_register':
@@ -22085,7 +22266,13 @@ _internal_compute_run() {
     fi
 
     local engine_id problem_id task_data compute_hash verifier_hash
-    IFS='|' read -r engine_id problem_id task_data compute_hash verifier_hash _ <<< "$selected_task"
+    if [[ "$selected_task" == corium/internal-engine-zero-v1\|* ]]; then
+        local zero_target zero_difficulty
+        IFS='|' read -r engine_id problem_id zero_target zero_difficulty compute_hash verifier_hash _ <<< "$selected_task"
+        task_data="${zero_target}|${zero_difficulty}"
+    else
+        IFS='|' read -r engine_id problem_id task_data compute_hash verifier_hash _ <<< "$selected_task"
+    fi
 
     _apply_theme "info" "任务已获取 / Task Acquired:"
     _apply_theme "accent" "  引擎ID / Engine ID:   ${engine_id}"
@@ -25202,6 +25389,11 @@ corix_snapshot() {
 
 # Creates a new snapshot. Uses ZFS/Btrfs if available for efficiency.
 # 创建一个新快照。如果可用，则优先使用 ZFS/Btrfs 以提高效率。
+_internal_snapshot_zfs_dataset() {
+    command -v zfs >/dev/null 2>&1 || return 1
+    zfs list -H -o name,mountpoint,mounted | awk -F '\t' -v path="$VAR_LIB_CORIUM_DIR" '$2==path && $3=="yes" {print $1; found=1; exit} END {if(!found) exit 1}'
+}
+
 corix_snapshot_create() {
     local name="$1"
     [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || return 1
@@ -25226,11 +25418,13 @@ corix_snapshot_create() {
 
     # --- 智能检测文件系统类型以实现高效快照 ---
     # --- Intelligent filesystem detection for efficient snapshots ---
-    if command -v zfs >/dev/null 2>&1 && zfs list -o name,mounted,mountpoint | grep -q "${VAR_LIB_CORIUM_DIR}\s*yes"; then
+    local detected_zfs_dataset=""
+    detected_zfs_dataset=$(_internal_snapshot_zfs_dataset 2>/dev/null) || detected_zfs_dataset=""
+    if [ -n "$detected_zfs_dataset" ]; then
         # --- ZFS a a ---
         info "ZFS filesystem detected. Creating efficient ZFS snapshot. / 检测到 ZFS 文件系统。正在创建高效的 ZFS 快照。"
         local dataset
-        dataset=$(zfs list -H -o name -t filesystem "${VAR_LIB_CORIUM_DIR}")
+        dataset=$(_internal_snapshot_zfs_dataset)
         if zfs snapshot "${dataset}@corix_${name}"; then
             snapshot_type="zfs"
             # We create a marker file to make it listable / 我们创建一个标记文件以便列表功能可以发现它
@@ -25238,10 +25432,11 @@ corix_snapshot_create() {
         else
             error "ZFS snapshot creation failed. / ZFS 快照创建失败。"
         fi
-    elif command -v btrfs >/dev/null 2>&1 && btrfs subvolume list -o "${VAR_LIB_CORIUM_DIR}" | grep -q "path ${VAR_LIB_CORIUM_DIR#*/}"; then
+    elif command -v btrfs >/dev/null 2>&1 && btrfs subvolume show "$VAR_LIB_CORIUM_DIR" >/dev/null 2>&1; then
         # --- Btrfs a a ---
         info "Btrfs subvolume detected. Creating efficient Btrfs snapshot. / 检测到 Btrfs 子卷。正在创建高效的 Btrfs 快照。"
-        if btrfs subvolume snapshot -r "${VAR_LIB_CORIUM_DIR}" "$snapshot_base_path"; then
+        mkdir -p "$snapshot_base_path" || return 1
+        if btrfs subvolume snapshot -r "${VAR_LIB_CORIUM_DIR}" "$snapshot_base_path/var"; then
             snapshot_type="btrfs"
         else
             error "Btrfs snapshot creation failed. / Btrfs 快照创建失败。"
@@ -25326,7 +25521,7 @@ corix_snapshot_delete() {
     case "$type" in
         zfs)
             local dataset
-            dataset=$(zfs list -H -o name -t filesystem "${VAR_LIB_CORIUM_DIR}")
+            dataset=$(_internal_snapshot_zfs_dataset)
             zfs destroy "${dataset}@corix_${name}" || error "Failed to destroy ZFS snapshot. / 销毁 ZFS 快照失败。"
             rm -rf "$snapshot_base_path" # Remove the marker directory / 删除标记目录
             ;;
@@ -25406,7 +25601,7 @@ corix_snapshot_rollback() (
     case "$type" in
         zfs)
             local dataset
-            dataset=$(zfs list -H -o name -t filesystem "$VAR_LIB_CORIUM_DIR")
+            dataset=$(_internal_snapshot_zfs_dataset)
             zfs rollback -r "${dataset}@corix_${name}" || error "ZFS rollback failed. / ZFS 回滚失败。"
             # ZFS rollback is atomic and replaces the content, so we just need to recreate the dir structure
             # ZFS 回滚是原子的，会替换内容，我们只需重建目录结构
@@ -26134,8 +26329,7 @@ _get_current_compute_task() {
     current_chain_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE(MAX(height), 0) FROM blocks;")
 
     # --- 步骤 1: 查找所有当前链上激活的计算引擎 Mod ---
-    db_query_safe "$BLOCKCHAIN_DB" \
-        "SELECT engine_id, pkg_id, compute_program_hash, verifier_script_hash, description FROM compute_engines WHERE is_active = 1;" | while IFS='|' read -r engine_id pkg_id compute_program_hash verifier_script_hash description; do
+    while IFS='|' read -r engine_id pkg_id compute_program_hash verifier_script_hash description; do
         
         local active_problem_set_info
         active_problem_set_info=$(db_query_safe "$BLOCKCHAIN_DB" \
@@ -26190,7 +26384,7 @@ _get_current_compute_task() {
         
         echo "${engine_id}|${problem_id}|${task_data}|${compute_program_hash}|${verifier_script_hash}|${description}"
         tasks_found=1
-    done
+    done < <(db_query_safe "$BLOCKCHAIN_DB" "SELECT engine_id, pkg_id, compute_program_hash, verifier_script_hash, description FROM compute_engines WHERE is_active = 1;")
 
     # --- 回退到内置的“零号引擎” (难度已调整为2) ---
     if [ "$tasks_found" -eq 0 ]; then
@@ -27063,7 +27257,7 @@ ${my_id}"
             local signature; signature=$(sign_data "$canonical_str" "$USER_IDENTITY_FILE") || return 1
             local snso_object=$(jq -n --arg ph "$proposal_hash" --arg nid "$my_id" --arg sig "$signature" \
                 '{proposal_hash: $ph, notary_id: $nid, signature: $sig}')
-            [ "$(db_query_safe "$FORUM_DB" "SELECT COUNT(*) FROM exodus_proposals WHERE proposal_hash=%s AND expires_at>unixepoch();" "$proposal_hash")" -eq 1 ] || return 1
+            [ "$(db_query_safe "$FORUM_DB" "SELECT COUNT(*) FROM exodus_proposals WHERE proposal_hash=%s AND expires_at>CAST(strftime('%s','now') AS INTEGER);" "$proposal_hash")" -eq 1 ] || return 1
             db_execute_safe "$FORUM_DB" "INSERT OR IGNORE INTO exodus_notarizations VALUES (%s,%s,%s,%s);" "$proposal_hash" "$my_id" "$signature" "$snso_object" || return 1
             _apply_theme "info" "正在广播您对提案 ${proposal_hash:0:16}... 的公证签名... / Broadcasting your notarization for proposal ${proposal_hash:0:16}..."
             local peers; peers=$(dht_find_closest_nodes "$my_id" 10) || peers=""
@@ -27094,7 +27288,7 @@ ${my_id}"
             
             local proposal_height=""
             local proposal_target_hash=""
-            IFS="|" read -r proposal_height proposal_target_hash < <(db_query_safe "$FORUM_DB" "SELECT target_block_height, target_block_hash FROM exodus_proposals WHERE proposal_hash = %s AND expires_at > unixepoch();" "$proposal_hash")
+            IFS="|" read -r proposal_height proposal_target_hash < <(db_query_safe "$FORUM_DB" "SELECT target_block_height, target_block_hash FROM exodus_proposals WHERE proposal_hash = %s AND expires_at > CAST(strftime('%s','now') AS INTEGER);" "$proposal_hash")
 
             if [ -z "$proposal_height" ] || [ -z "$proposal_target_hash" ]; then
                 error "无法从本地提案记录中获取目标区块高度。/ Could not retrieve target block height from local proposals."
@@ -30081,6 +30275,9 @@ _seminternal_gen_docs() {
             ;;
     esac
 }
+
+# Recover durable state before either CLI dispatch or a sourced API invocation.
+_internal_recover_abandoned_transactions || { return 1 2>/dev/null || exit 1; }
 
 # 主分发器开始
 

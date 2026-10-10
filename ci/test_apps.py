@@ -4,11 +4,12 @@ import json
 import shlex
 import sqlite3
 import unittest
-from test_core import Fixture, CoreTests
+from test_core import Fixture
+import test_core
 
 class Applications(Fixture):
-    put_transaction = CoreTests.put_transaction
-    validate_transaction = CoreTests.validate_transaction
+    put_transaction = test_core.CoreTests.put_transaction
+    validate_transaction = test_core.CoreTests.validate_transaction
 
     def transaction(self, kind, payload):
         result = self.run_core('blockchain_create_transaction '+shlex.quote(kind)+' '+shlex.quote(json.dumps(payload, ensure_ascii=False)))

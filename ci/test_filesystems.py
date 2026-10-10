@@ -21,7 +21,7 @@ class Filesystems(Fixture):
         elif self.backend=='zfs':
             self.dataset=os.environ['CORIUM_ZPOOL']+'/case'
             self.command('zfs','create','-o','mountpoint='+str(self.base),self.dataset)
-            self.addCleanup(self.command,'zfs','destroy','-r',self.dataset)
+            self.addCleanup(self.command,'zfs','destroy','-rf',self.dataset)
         else:
             raise AssertionError('Unknown real backend '+self.backend)
         shutil.copytree(old,self.base,dirs_exist_ok=True); shutil.rmtree(old)
@@ -51,7 +51,7 @@ class Filesystems(Fixture):
         meta=(self.base/'snapshots/created/snapshot.meta').read_text()
         self.assertIn('type='+self.backend,meta,'Backend silently fell back to rsync')
         if self.backend=='btrfs':
-            self.command('btrfs','subvolume','show',str(self.base/'snapshots/created'))
+            self.command('btrfs','subvolume','show',str(self.base/'snapshots/created/var'))
         else:
             self.command('zfs','list','-t','snapshot',self.dataset+'@corix_created')
 

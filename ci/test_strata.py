@@ -10,7 +10,7 @@ from test_gateway import SOURCE
 
 class Strata(Fixture):
     def run_core(self, script, ok=True):
-        result=subprocess.run(['bash','-c','source '+shlex.quote(str(SOURCE))+'\n'+script],env=self.env,capture_output=True,text=True,timeout=1800)
+        result=subprocess.run(['bash','-c','source '+shlex.quote(str(SOURCE))+'\nSANDBOX_TOOL=bwrap; STRATA_HOME_MODE=none; STRATA_EXPOSE_HOST_PKGCACHE=0; '+script],env=self.env,capture_output=True,text=True,timeout=1800)
         if ok and result.returncode: self.fail(script+'\n'+result.stdout+result.stderr)
         if not ok and not result.returncode: self.fail('Invalid operation accepted: '+script)
         return result

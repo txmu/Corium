@@ -18,12 +18,12 @@ if [[ "$pm" == pkgsrc ]]; then
 fi
 case "$pm" in
   apt) image=ubuntu:24.04; install='apt-get update && apt-get install -y bash coreutils findutils python3 jq openssl curl' ;;
-  pacman) image=archlinux:base; install='pacman -Syu --noconfirm python jq openssl curl' ;;
-  dnf) image=fedora:43; install='dnf install -y bash coreutils findutils python3 jq openssl curl' ;;
+  pacman) image=archlinux:base; install='pacman -Syu --noconfirm python jq openssl curl diffutils' ;;
+  dnf) image=fedora:43; install='dnf install -y bash coreutils findutils python3 jq openssl curl diffutils' ;;
   portage) image=gentoo/stage3:latest; install='emerge --sync && emerge --ask=n app-portage/gentoolkit app-misc/jq' ;;
-  xbps) image=ghcr.io/void-linux/void-glibc-full:latest; install='xbps-install -Suy && xbps-install -y bash coreutils findutils python3 jq openssl curl' ;;
-  zypper) image=opensuse/leap:15.6; install='zypper --non-interactive install bash coreutils findutils python3 jq openssl curl' ;;
+  xbps) image=ghcr.io/void-linux/void-glibc-full:latest; install='xbps-install -Suy && xbps-install -y bash coreutils findutils python3 jq openssl curl diffutils' ;;
+  zypper) image=opensuse/leap:15.6; install='zypper --non-interactive install bash coreutils findutils python3 jq openssl curl diffutils' ;;
   *) exit 2 ;;
 esac
 docker run --rm -v "$PWD:/work" -w /work -e CORIUM_PM_REPORT=/work/ci-logs "$image" \
-  bash -c "$install && bash ci/test-external-pm.sh '$pm'" 2>&1 | tee "ci-logs/external-${pm}.log"
+  sh -c "$install && bash ci/test-external-pm.sh '$pm'" 2>&1 | tee "ci-logs/external-${pm}.log"

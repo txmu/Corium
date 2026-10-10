@@ -53,7 +53,7 @@ class Network(unittest.TestCase):
         proc=subprocess.Popen(['ip','netns','exec','corium-wan','turnserver','-n','--no-cli','--no-auth','--stun-only','--listening-ip=198.18.0.2','--listening-port=3478','--alt-listening-port=3479','--log-file=stdout'],stdout=stream,stderr=stream,start_new_session=True)
         self.addCleanup(self.stop,proc); time.sleep(2); self.assertIsNone(proc.poll())
         output=self.core(self.peers['a'],"CORIUM_STUN_SERVERS=198.18.0.2:3478 python3 -c "+shlex.quote(
-            "import ast,os,json; from test_gateway import DAEMON; os.environ['SCRIPT_PATH']="+repr(str(SOURCE))+"; ns={'__name__':'stun_ci'}; nodes=ast.parse(DAEMON).body; boundary=next(i for i,n in enumerate(nodes) if isinstance(n,ast.ClassDef) and n.name=='SandboxAPI'); exec(compile(ast.Module(body=nodes[:boundary],type_ignores=[]),'gateway','exec'),ns); ns['discover_public_address'](); print(json.dumps({'ip':ns['PUBLIC_IP'],'port':ns['PUBLIC_PORT']}))")).stdout
+            "import ast,os,json; from test_gateway import DAEMON; os.environ['SCRIPT_PATH']="+repr(str(SOURCE))+"; ns={'__name__':'stun_ci','PUBLIC_IP':None,'PUBLIC_PORT':None,'NAT_TYPE':None}; nodes=ast.parse(DAEMON).body; boundary=next(i for i,n in enumerate(nodes) if isinstance(n,ast.ClassDef) and n.name=='SandboxAPI'); exec(compile(ast.Module(body=nodes[:boundary],type_ignores=[]),'gateway','exec'),ns); ns['discover_public_address'](); print(json.dumps({'ip':ns['PUBLIC_IP'],'port':ns['PUBLIC_PORT']}))")).stdout
         data=json.loads(output.splitlines()[-1]); self.assertEqual(data['ip'],'198.18.0.1'); self.assertGreater(data['port'],0)
         counters=subprocess.check_output(['ip','netns','exec','corium-router','iptables','-t','nat','-L','POSTROUTING','-n','-v'],text=True)
         self.assertIn('MASQUERADE',counters); pathlib.Path('ci-logs/nat-counters.txt').write_text(counters)
@@ -88,7 +88,7 @@ class Network(unittest.TestCase):
 
     def test_real_upnp_igd_discovery_and_all_three_production_port_mappings(self):
         config=pathlib.Path(os.environ['RUNNER_TEMP'])/'miniupnpd.conf'
-        config.write_text('ext_ifname=wan0\nlistening_ip=10.81.1.1\nenable_upnp=yes\nenable_natpmp=yes\nsecure_mode=yes\nsystem_uptime=yes\nuuid=12345678-1234-1234-1234-123456789abc\nallow 1024-65535 10.81.1.0/24 1024-65535\n')
+        config.write_text('ext_ifname=wan0\next_allow_private_ipv4=yes\nlistening_ip=10.81.1.1\nenable_upnp=yes\nenable_natpmp=yes\nsecure_mode=yes\nsystem_uptime=yes\nuuid=12345678-1234-1234-1234-123456789abc\nallow 1024-65535 10.81.1.0/24 1024-65535\n')
         stream=pathlib.Path('ci-logs/upnp-router.log').open('w'); self.addCleanup(stream.close)
         proc=subprocess.Popen(['ip','netns','exec','corium-router','miniupnpd','-d','-f',str(config)],stdout=stream,stderr=stream,start_new_session=True)
         self.addCleanup(self.stop,proc); time.sleep(2); self.assertIsNone(proc.poll())

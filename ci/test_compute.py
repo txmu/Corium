@@ -3,11 +3,12 @@ import hashlib
 import json
 import shlex
 import sqlite3
-from test_core import Fixture, CoreTests
+from test_core import Fixture
+import test_core
 
 class Compute(Fixture):
-    put_transaction=CoreTests.put_transaction
-    validate_transaction=CoreTests.validate_transaction
+    put_transaction=test_core.CoreTests.put_transaction
+    validate_transaction=test_core.CoreTests.validate_transaction
 
     def test_engine_zero_task_proof_binding_and_native_submission(self):
         task=self.run_core('_get_current_compute_task').stdout.strip().splitlines()[-1]

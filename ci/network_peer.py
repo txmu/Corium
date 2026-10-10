@@ -9,6 +9,8 @@ import pathlib
 import signal
 import ssl
 import threading
+import sys
+sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]))
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import ec
