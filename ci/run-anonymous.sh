@@ -16,8 +16,14 @@ else
   i2pd --version
   sudo systemctl stop i2pd || true
   # The Ubuntu profile restricts writes to /var/lib/i2pd; this runner uses disposable datadirs.
-  for profile in /etc/apparmor.d/i2pd /etc/apparmor.d/usr.bin.i2pd /etc/apparmor.d/usr.sbin.i2pd; do
-    if [[ -f "$profile" ]]; then sudo apparmor_parser -R "$profile"; fi
-  done
+  apparmor_profiles=/sys/kernel/security/apparmor/profiles
+  if sudo test -r "$apparmor_profiles"; then
+    for profile_name in i2pd /usr/bin/i2pd /usr/sbin/i2pd; do
+      if sudo awk -v profile="$profile_name" 'index($0, profile " (")==1 {found=1} END {exit !found}' "$apparmor_profiles"; then
+        # Remove by the loaded policy name; an installed file may be unloaded or duplicated.
+        printf 'profile "%s" {}\n' "$profile_name" | sudo apparmor_parser --remove
+      fi
+    done
+  fi
 fi
 CORIUM_ANONYMOUS_BACKEND="$backend" python3 -m unittest -v ci.test_anonymous 2>&1 | tee "ci-logs/anonymous-${backend}.log"
