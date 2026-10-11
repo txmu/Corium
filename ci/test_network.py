@@ -92,11 +92,21 @@ class Network(unittest.TestCase):
         self.router('ip addr add 11.81.3.1/32 dev wan0')
         self.addCleanup(self.router,'ip addr del 11.81.3.1/32 dev wan0')
         config=pathlib.Path(os.environ['RUNNER_TEMP'])/'miniupnpd.conf'
-        config.write_text('ext_ifname=wan0\next_ip=11.81.3.1\nlistening_ip=10.81.1.1\nenable_upnp=yes\nenable_natpmp=yes\nsecure_mode=yes\nsystem_uptime=yes\nuuid=12345678-1234-1234-1234-123456789abc\nallow 1024-65535 10.81.1.0/24 1024-65535\n')
-        # miniupnpd needs its chains in this router namespace, independently of the host service.
-        self.router('set -e\niptables -N MINIUPNPD\niptables -A FORWARD -j MINIUPNPD\n'
-                    'iptables -t nat -N MINIUPNPD\niptables -t nat -A PREROUTING -j MINIUPNPD\n'
-                    'iptables -t nat -N MINIUPNPD-POSTROUTING\niptables -t nat -A POSTROUTING -j MINIUPNPD-POSTROUTING')
+        config.write_text('ext_ifname=wan0\next_ip=11.81.3.1\nlistening_ip=lan-a\nenable_upnp=yes\nenable_natpmp=yes\nsecure_mode=yes\nsystem_uptime=yes\nupnp_table_name=corium_upnp\nupnp_nat_table_name=corium_upnp\nuuid=12345678-1234-1234-1234-123456789abc\nallow 1024-65535 10.81.1.0/24 1024-65535\n')
+        # Ubuntu's daemon uses native nftables, independently of iptables-nft tables.
+        self.router("""nft -f - <<'NFT'
+add table inet corium_upnp
+add chain inet corium_upnp forward { type filter hook forward priority 0; policy accept; }
+add chain inet corium_upnp miniupnpd
+add rule inet corium_upnp forward jump miniupnpd
+add chain inet corium_upnp prerouting { type nat hook prerouting priority -100; policy accept; }
+add chain inet corium_upnp prerouting_miniupnpd
+add rule inet corium_upnp prerouting jump prerouting_miniupnpd
+add chain inet corium_upnp postrouting { type nat hook postrouting priority 100; policy accept; }
+add chain inet corium_upnp postrouting_miniupnpd
+add rule inet corium_upnp postrouting jump postrouting_miniupnpd
+NFT""")
+        self.addCleanup(self.router,'nft delete table inet corium_upnp')
         stream=pathlib.Path('ci-logs/upnp-router.log').open('w'); self.addCleanup(stream.close)
         proc=subprocess.Popen(['ip','netns','exec','corium-router','miniupnpd','-d','-f',str(config)],stdout=stream,stderr=stream,start_new_session=True)
         self.addCleanup(self.stop,proc); time.sleep(2); self.assertIsNone(proc.poll())
@@ -105,7 +115,9 @@ class Network(unittest.TestCase):
               "ns={'__name__':'upnp_ci'}; nodes=ast.parse(DAEMON).body; boundary=next(i for i,n in enumerate(nodes) if isinstance(n,ast.ClassDef) and n.name=='SandboxAPI'); "
               "exec(compile(ast.Module(body=nodes[:boundary],type_ignores=[]),'gateway','exec'),ns); ns['setup_automatic_port_forwarding'](); "
               "u=miniupnpc.UPnP(); u.discoverdelay=2000; u.discover(); u.selectigd(); print(json.dumps([u.getspecificportmapping(p,'TCP') for p in (18345,19345,20345)]))")
-        output=self.core(self.peers['a'],'python3 -c '+shlex.quote(code)).stdout
+        result=self.core(self.peers['a'],'python3 -c '+shlex.quote(code))
+        pathlib.Path('ci-logs/upnp-client.log').write_text(result.stdout+result.stderr)
+        output=result.stdout
         mappings=json.loads(output.splitlines()[-1]); self.assertEqual(len(mappings),3)
         for mapping in mappings:
             self.assertIsNotNone(mapping); self.assertEqual(mapping[0],'10.81.1.2')

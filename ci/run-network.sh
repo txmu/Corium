@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p ci-logs
-sudo apt-get install -y coturn iptables tcpdump miniupnpd miniupnpc
+sudo apt-get install -y coturn iptables nftables tcpdump miniupnpd miniupnpc
 sudo systemctl stop miniupnpd || true
 cleanup() {
   for namespace in corium-a corium-b corium-wan corium-router; do

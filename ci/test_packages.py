@@ -47,6 +47,7 @@ package() {{
     cp hello "$pkgdir/usr/bin/hello"
 }}
 ''')
+        self.run_core('_update_metadata_cache')
         self.run_core('SANDBOX_TOOL=bubblewrap; corix_build dev/hello build_result')
         archives=list(self.cache.glob('*.corix.tar.*')); self.assertEqual(len(archives),1)
         archive=archives[0]; type(archive)(str(archive)+'.sig.gpg').write_bytes(self.signer.signature(archive.read_bytes()))

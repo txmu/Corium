@@ -12,7 +12,7 @@ case "$pm" in
   portage) expected=$(equery -q list sys-apps/portage | sed -E 's|^(.*)/([^-]+)-(.+)$|\1/\2\t\3|') ;;
   xbps) expected=$(xbps-query -p pkgver bash | sed -E 's/^(.*)-([^-]+)$/\1\t\2/') ;;
   zypper) expected=$(rpm -q bash --queryformat '%{NAME}\t%{VERSION}-%{RELEASE}') ;;
-  pkgsrc) expected=$(pkg_info -q -a | head -n 1 | sed -E 's/^(.*)-([^-]+)$/\1\t\2/') ;;
+  pkgsrc) expected=$(pkg_info -e '*' | sed -n '1p' | sed -E 's/^(.*)-([^-]+)$/\1\t\2/') ;;
   pip) expected=$(python3 -m pip show pip | awk '/^Version:/{print "pip\t" $2}') ;;
   npm)
     fixture=$(mktemp -d)
@@ -27,8 +27,12 @@ source ./corix_v108.sh
 corix_manage_sync "$pm"
 file="$EXTERNAL_PM_DB/$pm.db"
 [[ -s "$file" ]]
-awk -F '\t' -v expected="$expected" '($1 "\t" $2)==expected {found=1} END {exit !found}' "$file"
 cp "$file" "${CORIUM_PM_REPORT:-/tmp}/external-${pm}.tsv"
+if ! awk -F '\t' -v expected="$expected" '($1 "\t" $2)==expected {found=1} END {exit !found}' "$file"; then
+  printf 'Expected native inventory row: %s\n' "$expected"
+  cat "$file"
+  exit 1
+fi
 # Import an external inventory twice and verify deterministic output.
 cp "$file" "$CORIUM_ROOT/first.tsv"
 corix_manage_sync "$pm"

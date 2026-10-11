@@ -8944,7 +8944,7 @@ corix_manage_sync() {
         pkgsrc)
             check_dep pkg_info
             info "正在查询 pkgsrc 数据库... (Querying pkgsrc database...)"
-            pkg_info -q -a | while read -r line; do
+            pkg_info -e '*' | while read -r line; do
                 local pkgname="${line%-*}"
                 local version="${line##*-}"
                 echo -e "${pkgname}\t${version}\tinstalled\tpkgsrc"
