@@ -9,7 +9,7 @@ else
   sudo apt-get install -y i2pd
   sudo systemctl stop i2pd || true
   # The Ubuntu profile restricts writes to /var/lib/i2pd; this runner uses disposable datadirs.
-  for profile in /etc/apparmor.d/usr.bin.i2pd /etc/apparmor.d/usr.sbin.i2pd; do
+  for profile in /etc/apparmor.d/i2pd /etc/apparmor.d/usr.bin.i2pd /etc/apparmor.d/usr.sbin.i2pd; do
     if [[ -f "$profile" ]]; then sudo apparmor_parser -R "$profile"; fi
   done
 fi

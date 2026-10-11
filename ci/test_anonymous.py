@@ -48,7 +48,7 @@ class AnonymousNetworks(Fixture):
             config=self.root/'i2pd.conf'; tunnels=self.root/'tunnels.conf'
             config.write_text('daemon=false\nlog=stdout\nloglevel=debug\n[http]\nenabled=true\nport=17070\n[httpproxy]\nenabled=true\nport=14444\n[socksproxy]\nenabled=true\nport=14447\n')
             tunnels.write_text('[corium-ci]\ntype=server\nhost=127.0.0.1\nport=19345\ninport=443\nkeys=corium-ci.dat\ninbound.length=2\noutbound.length=2\n')
-            process=self.start(['i2pd','--service=false','--datadir='+str(data),'--conf='+str(config),'--tunconf='+str(tunnels)],'i2p.log')
+            process=self.start(['i2pd','--datadir='+str(data),'--conf='+str(config),'--tunconf='+str(tunnels)],'i2p.log')
             deadline=time.monotonic()+600; keys=data/'corium-ci.dat'
             while time.monotonic()<deadline and not keys.exists() and process.poll() is None: time.sleep(2)
             self.assertTrue(keys.exists(),'I2P destination keys were not generated')
