@@ -2,6 +2,19 @@
 
 Corium v108 单文件 Bash 实现，入口为 `corix_v108.sh`。
 
+## Ziokt 原生接入
+
+`corix ziokt capabilities` 查看默认关闭的本地联邦契约。所选网络的
+`corix.conf` 新增 `[ziokt]` 段，使用 `enabled = TRUE`、`federation_id`、
+`provider_id` 和 `allow_mutations = FALSE`；配置文件必须为当前用户所有、
+非符号链接、模式 `0600`。`corix ziokt --network NAME rpc --stdio` 使用固定、
+有界、只读操作表。此入口在原生建锁目录、恢复和交互之前分流，不写盘。
+
+全部实现内嵌在生产文件，独立交付不依赖 Ziokt 仓库。普通原生命令与
+sourced API 保留既有行为。当前仅提供能力、状态和软件包/Strata 元数据，
+不将存储记录声明为运行健康。运行 `python3 -m unittest -v test_ziokt`
+验证独立交付、关闭模式、网络作用域、协议拒绝和无恢复副作用。
+
 ## 自动化验证
 
 [GitHub Actions](https://github.com/txmu/Corium/actions/workflows/validation.yml) 在 Ubuntu 22.04 和 24.04 上运行全部既有测试套件，以及新增原生 sandbox 与应用边界回归。两组固定随机种子为 108、2026，chaos/soak 各 16 轮。

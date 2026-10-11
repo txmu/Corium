@@ -45,6 +45,12 @@ jobs:
         run: |
           set -o pipefail
           python -m unittest -v test_ci_integration 2>&1 | tee ci-logs/integration.log
+      - name: Native Ziokt opt-in contract
+        if: ${{ !cancelled() }}
+        run: python -m unittest -v test_ziokt
+      - name: Native ZKT testchain (no production issuance)
+        if: ${{ !cancelled() }}
+        run: python -m unittest -v test_zkt
       - name: All original suites (BLOCKED fails)
         if: ${{ !cancelled() }}
         run: bash test_all.sh
