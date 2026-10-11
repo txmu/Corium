@@ -66,6 +66,16 @@ package() {{
         self.run_core('corix_remove dev/hello:0 <<< y')
         self.assertFalse((self.root/'usr/bin/hello0').exists()); self.assertTrue((self.root/'usr/bin/hello1').exists())
 
+    def test_rebuild_repairs_missing_files_from_cached_signed_binary(self):
+        self.binary('0')
+        self.run_core('DEP_MODE=auto; corix_install dev/hello:0')
+        target=self.root/'usr/bin/hello'
+        expected=target.read_bytes(); state=self.semantic()
+        target.unlink()
+        self.run_core('DEP_MODE=auto; corix_rebuild_from_world --force')
+        self.assertEqual(target.read_bytes(),expected)
+        self.assertEqual(self.semantic(),state)
+
     def test_different_slot_file_conflict_is_atomic(self):
         self.binary('0'); self.run_core('DEP_MODE=auto; corix_install dev/hello:0')
         before=self.semantic(); contents=(self.root/'usr/bin/hello').read_bytes(); world=(self.etc/'world').read_text()

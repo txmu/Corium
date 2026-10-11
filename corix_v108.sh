@@ -24620,6 +24620,34 @@ corix_rebuild_from_world() {
     mapfile -t to_install < <(comm -13 <(printf '%s\n' "${installed_pkgs_sorted[@]}") <(printf '%s\n' "${target_corix_pkgs[@]}" | sort -u))
     mapfile -t to_keep < <(comm -12 <(printf '%s\n' "${installed_pkgs_sorted[@]}") <(printf '%s\n' "${target_corix_pkgs[@]}" | sort -u))
     [ "$prune" -eq 1 ] && mapfile -t to_remove < <(comm -23 <(printf '%s\n' "${installed_pkgs_sorted[@]}") <(printf '%s\n' "${target_corix_pkgs[@]}" | sort -u))
+
+    # Installation records alone do not prove that a package's files still exist.
+    local kept_pkg package_dir file_entry installed_path files_present
+    local -a intact_packages=()
+    for kept_pkg in "${to_keep[@]}"; do
+        [ -n "$kept_pkg" ] || continue
+        get_pkg_id_parts "$kept_pkg" || return 1
+        package_dir=$(db_get_pkg_dir "$PKG_CATEGORY/$PKG_NAME" "$PKG_SLOT")
+        files_present=1
+        if [ -r "$package_dir/files" ]; then
+            while IFS= read -r file_entry || [ -n "$file_entry" ]; do
+                [ -n "$file_entry" ] || continue
+                installed_path="${CORIUM_ROOT%/}/${file_entry}"
+                if [ ! -e "$installed_path" ] && [ ! -L "$installed_path" ]; then
+                    files_present=0
+                    break
+                fi
+            done < "$package_dir/files"
+        else
+            files_present=0
+        fi
+        if [ "$files_present" -eq 1 ]; then
+            intact_packages+=("$kept_pkg")
+        else
+            to_install+=("$kept_pkg")
+        fi
+    done
+    to_keep=("${intact_packages[@]}")
     
     # [NEW] Use comm to calculate Strata changes
     # [新增] 使用 comm 计算 Strata 环境的变更
@@ -24745,7 +24773,7 @@ corix_rebuild_from_world() {
                 apt) install_cmd="apt-get install -y" ;;
                 pacman) install_cmd="pacman -S --noconfirm" ;;
                 dnf) install_cmd="dnf install -y" ;;
-                portage) install_cmd="emerge" ;; # Portage typically requires more config
+                portage) install_cmd="emerge --noreplace" ;;
             esac
 
             if [ -n "$install_cmd" ]; then
