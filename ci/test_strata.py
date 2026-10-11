@@ -22,6 +22,15 @@ class Strata(Fixture):
         self.strata.mkdir(parents=True)
         # docker export supplies the actual filesystem and package database.
         subprocess.run(['tar','--numeric-owner','-xf',os.environ['CORIUM_STRATA_ROOTFS'],'-C',str(self.strata)],check=True)
+        if self.pm=='portage':
+            # A signed complete snapshot avoids rsync mirrors changing mid-transfer.
+            configs=self.strata/'etc/portage/repos.conf'
+            if configs.is_symlink() or configs.is_file(): configs.unlink()
+            configs.mkdir(parents=True,exist_ok=True)
+            (configs/'zz-corium-ci.conf').write_text(
+                '[gentoo]\nlocation = /var/db/repos/gentoo\nsync-type = webrsync\n'
+                'sync-webrsync-verify-signature = yes\n'
+                'sync-openpgp-key-path = /usr/share/openpgp-keys/gentoo-release.asc\n')
         (self.strata/'.corix_strata').write_text('name=native\npm='+self.pm+'\ncorix_version=108\n')
         (self.etc/'world').write_text('')
         self.env['SANDBOX_TOOL']='bwrap'
@@ -33,7 +42,7 @@ class Strata(Fixture):
             'apt':('apt-get update && apt-get install -y hello','dpkg-query -W hello','apt-get remove -y hello'),
             'pacman':('pacman -Syu --noconfirm tree','pacman -Q tree','pacman -R --noconfirm tree'),
             'dnf':('dnf install -y hello','rpm -q hello','dnf remove -y hello'),
-            'portage':('emerge --sync && emerge --ask=n app-portage/gentoolkit app-misc/hello','equery list app-misc/hello','emerge --unmerge app-misc/hello'),
+            'portage':('emerge --sync && emerge --ask=n --noreplace app-portage/gentoolkit app-misc/hello','equery list app-misc/hello','emerge --unmerge app-misc/hello'),
         }
         package = 'tree' if self.pm == 'pacman' else 'hello'
         install,query,remove=commands[self.pm]

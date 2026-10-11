@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -45,8 +46,10 @@ class AnonymousNetworks(Fixture):
             address=hostname.read_text().strip(); address_type='onion_v3'; proxy='socks5h://127.0.0.1:19050'; cache_key='p2p_tor_proxy'
         elif backend=='i2p':
             data=self.root/'i2pd'; data.mkdir()
+            # Isolated datadirs need the packaged trust certificates as well as keys.
+            shutil.copytree('/usr/share/i2pd/certificates',data/'certificates')
             config=self.root/'i2pd.conf'; tunnels=self.root/'tunnels.conf'
-            config.write_text('daemon=false\nlog=stdout\nloglevel=debug\n[http]\nenabled=true\nport=17070\n[httpproxy]\nenabled=true\nport=14444\n[socksproxy]\nenabled=true\nport=14447\n')
+            config.write_text('daemon=false\nlog=stdout\nloglevel=debug\n[reseed]\nverify=true\n[http]\nenabled=true\nport=17070\n[httpproxy]\nenabled=true\nport=14444\n[socksproxy]\nenabled=true\nport=14447\n')
             tunnels.write_text('[corium-ci]\ntype=server\nhost=127.0.0.1\nport=19345\ninport=443\nkeys=corium-ci.dat\ninbound.length=2\noutbound.length=2\n')
             process=self.start(['i2pd','--datadir='+str(data),'--conf='+str(config),'--tunconf='+str(tunnels)],'i2p.log')
             deadline=time.monotonic()+600; keys=data/'corium-ci.dat'
@@ -63,9 +66,11 @@ class AnonymousNetworks(Fixture):
         command='CORIUM_CONFIG_CACHE['+cache_key+']='+shlex.quote(proxy)+'; _dht_send_message_direct '+remote['id']+' PING anonymous-ci'
         deadline=time.monotonic()+600; success=False; trace=[]
         while time.monotonic()<deadline:
+            self.assertIsNone(process.poll(),backend+' router exited; see router log')
             # Public networks may need time to publish descriptors and establish tunnels.
             result=subprocess.run(['bash','-c','source '+shlex.quote(str(SOURCE))+'\n'+command],env=self.env,capture_output=True,text=True,timeout=90)
             trace.append(result.stdout+result.stderr)
+            pathlib.Path('ci-logs/anonymous-transport.log').write_text('\n'.join(trace))
             if result.returncode==0 and 'PONG' in result.stdout: success=True; break
             time.sleep(5)
         pathlib.Path('ci-logs/anonymous-transport.log').write_text('\n'.join(trace))
