@@ -1,0 +1,49 @@
+{
+  "mapping_kind": "manual; hashes detect drift, not equivalence",
+  "groups": {
+    "Kahn fanout and dependency filtering": [
+      "dep_resolve_topological"
+    ],
+    "Integer XOR": [
+      "kademlia_distance"
+    ],
+    "Semantic row normalization": [
+      "_internal_semantic_state"
+    ],
+    "Exodus tally": [
+      "_internal_verify_exodus_quorum"
+    ],
+    "Merkle and checkpoint codec": [
+      "_internal_ibc_codec",
+      "_internal_generate_merkle_siblings",
+      "_internal_ibc_generate_proof",
+      "_internal_verify_merkle_proof",
+      "_internal_verify_hash_chain_proof"
+    ],
+    "Database snapshot depth": [
+      "db_begin_transaction",
+      "db_commit_transaction",
+      "_internal_db_restore_snapshot"
+    ],
+    "Checked replay and reorganization": [
+      "_internal_replay_chain_state",
+      "_blockchain_reorganize_to"
+    ]
+  },
+  "sha256": {
+    "dep_resolve_topological": "471c90acba782ea49416a845001d3ce26c5ff524d6e6932bb42be9f0ef5726ea",
+    "kademlia_distance": "08c1595768a3b49e364f949bf1b144a05c61348568a87bc71180e3fc7eddfc46",
+    "_internal_semantic_state": "bc33899aac6e28a3635866078745ac61abceb4737308dd5d64f338916f62d93d",
+    "_internal_verify_exodus_quorum": "1614ff74735fbe53539b0417f1d11f27d3fa3e92f7d2717b8eb0fed205bb4848",
+    "_internal_ibc_codec": "def527de1ac330e98dee18bb6f9e70edf16e69d99d488a2aa74fe59a5d0d83a9",
+    "_internal_generate_merkle_siblings": "ef1f24000147b4d4b5b20613ab297fb92baa322590d0d592ac793d838ce08c54",
+    "_internal_ibc_generate_proof": "bc6587978f6309a6ff8bd9de865bf0d38583df269b2b50bad5191cc6a7b7f8fd",
+    "_internal_verify_merkle_proof": "85035cca5f57eeebe0a0cc376e2c2242c6a64679aab2a2d7f24317fc33f5ae15",
+    "_internal_verify_hash_chain_proof": "92b411a26e206c55fff66a93a5987a4733b8a6e018cfd7ab2b0f3890e696c77a",
+    "db_begin_transaction": "f737c9e2c5373e7bb652f4cfc846d7fb850403273f3a13f93ddd0a9bcb0dfa7b",
+    "db_commit_transaction": "ccf3891e1ccd89a3230e8e47ac10be0f540ecb24b3bb804663a8e6e53e87ab5c",
+    "_internal_db_restore_snapshot": "c6507c6d1c8742375feb4861154e0dd0724d9828f05e0f2ac5307883cd4ec539",
+    "_internal_replay_chain_state": "f9905599f6efd7b69e7e9ebd17a667da42e6804472552e1594bf2e5c8f120995",
+    "_blockchain_reorganize_to": "a2f66c1ab229d9fec11cd009bdb8ed63bcf288b1c2af7049e29e83f3e69f0fd3"
+  }
+}

@@ -1,6 +1,7 @@
 # GitHub Actions 覆盖审计
 
-所有测试只在 GitHub Actions 执行；本地仅编辑、读取、Git 提交与推送。
+重量级产品测试在 GitHub Actions 执行；本地允许 Lean 和语法检查。
+本轮新增八个针对性回归曾在本地通过，之后的完整测试以 CI 为准。
 历史 `VALIDATION_STATUS.md` 不能替代当前运行日志。
 
 ## 原有测试
@@ -8,6 +9,8 @@
 `validation.yml` 运行全部八个 Shell 套件（core/gateway/reorg/Phoenix/soak），
 Ubuntu 22.04 / 24.04 × seed 108 / 2026，chaos/soak 各 16 轮。
 官方 sqlite3、真实 OpenSSL/GPG、TLS、Python cryptography 和系统依赖均安装。
+core 入口额外运行 `test_formal_alignment.py`，覆盖修复后的 Merkle/IBC 检查点证明。
+独立 `formal.yml` 固定 Lean 4.19.0，重跑全部证明、公理审计与源码映射漂移检查。
 全部 Shell 语法、项目与 ci Python、直接执行的内嵌 Python 编译在 CI 验证。
 ShellCheck 为非阻断报告，有内存/超时上限，超限不是通过。
 

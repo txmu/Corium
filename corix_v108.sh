@@ -19186,89 +19186,171 @@ _internal_ibc_get_outgoing() {
         '
 }
 
-_internal_generate_merkle_siblings() {
-    local target_hash="$1"
-    shift
-    local hashes=("$@")
-    local siblings_json="[]"
+# Checkpoint proofs authenticate historical block contents, not new consensus.
+# A proof cannot advance the governance-configured trust anchor.
+_internal_ibc_codec() {
+    "${PYTHON_CMD}" - "$@" <<'PY_IBC_CODEC'
+import base64, hashlib, json, pathlib, re, sqlite3, sys
+FORMAT = 'CORIUM_IBC_CHECKPOINT_V2'
+def unique_object(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out: raise ValueError('Duplicate JSON key')
+        out[key] = value
+    return out
+def load(raw):
+    return json.loads(raw, object_pairs_hook=unique_object,
+                      parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Nonfinite JSON number')))
+def dump(value):
+    return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+def digest(raw):
+    return hashlib.sha256(raw.encode()).hexdigest()
+def valid_hash(value):
+    return isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value) is not None
 
-    while [ ${#hashes[@]} -gt 1 ]; do
-        local target_index=-1
-        local next_level_hashes=()
-        
-        for i in "${!hashes[@]}"; do
-            if [ "${hashes[$i]}" = "$target_hash" ]; then
-                target_index=$i
+def checked_nodes(nodes):
+    if not isinstance(nodes, list) or not all(valid_hash(x) for x in nodes):
+        raise ValueError('Invalid Merkle leaves')
+    return nodes
+
+def next_level(nodes):
+    return [digest(nodes[i] + (nodes[i+1] if i+1 < len(nodes) else nodes[i]))
+            for i in range(0, len(nodes), 2)]
+
+def merkle_root(nodes):
+    nodes = checked_nodes(nodes)
+    if not nodes: return digest('')
+    while len(nodes) > 1: nodes = next_level(nodes)
+    return nodes[0]
+
+def siblings(target, nodes):
+    nodes = checked_nodes(nodes)
+    if not valid_hash(target) or target not in nodes:
+        raise ValueError('Target transaction is absent')
+    index = nodes.index(target)
+    proof = []
+    while len(nodes) > 1:
+        if index % 2:
+            proof.append({'hash': nodes[index-1], 'position': 'left'})
+        else:
+            proof.append({'hash': nodes[index+1] if index+1 < len(nodes) else nodes[index],
+                          'position': 'right'})
+        nodes = next_level(nodes)
+        index //= 2
+    return proof
+
+def verify_merkle(header, proof):
+    expected, target = header['transactions_root'], proof['target_tx_hash']
+    if not valid_hash(expected) or not valid_hash(target): raise ValueError('Invalid root or target')
+    path = proof['siblings']
+    if not isinstance(path, list): raise ValueError('Invalid sibling path')
+    value = target
+    for item in path:
+        sibling, position = item['hash'], item['position']
+        if not valid_hash(sibling) or position not in ('left', 'right'):
+            raise ValueError('Invalid sibling')
+        value = digest(value+sibling if position == 'right' else sibling+value)
+    if value != expected: raise ValueError('Merkle root mismatch')
+
+def block_header(row):
+    height, block_hash, previous, timestamp, validator, signature, raw_txs = row[:7]
+    nodes = load(raw_txs)
+    header = {'height': height, 'hash': block_hash, 'previous_hash': previous,
+              'timestamp': timestamp, 'transactions': nodes,
+              'transactions_root': merkle_root(nodes), 'validator': validator, 'signature': signature}
+    check_header(header)
+    return header
+
+def check_header(header):
+    height, timestamp, previous = header['height'], header['timestamp'], header['previous_hash']
+    if type(height) is not int or type(timestamp) is not int or not 0 <= height < 2**63 or not 0 <= timestamp < 2**63:
+        raise ValueError('Invalid block height or timestamp')
+    if not (previous == '0' if height == 0 else valid_hash(previous)):
+        raise ValueError('Invalid previous block hash')
+    nodes = checked_nodes(header['transactions'])
+    if len(nodes) != len(set(nodes)): raise ValueError('Duplicate block transaction')
+    body = {'height': height, 'previous_hash': previous, 'timestamp': timestamp, 'transactions': nodes}
+    if not valid_hash(header['hash']) or digest(dump(body)) != header['hash']:
+        raise ValueError('Block content hash mismatch')
+    if merkle_root(nodes) != header['transactions_root']: raise ValueError('Unbound Merkle root')
+    return header['hash']
+
+mode, *args = sys.argv[1:]
+if mode == 'siblings':
+    print(dump(siblings(args[0], args[1:])))
+elif mode == 'merkle':
+    verify_merkle(load(args[0]), load(args[1]))
+elif mode == 'generate':
+    path, target = args
+    if not valid_hash(target): raise ValueError('Invalid target transaction')
+    with sqlite3.connect(pathlib.Path(path).resolve().as_uri()+'?mode=ro', uri=True) as db:
+        # One read transaction gives all rows the same SQLite snapshot.
+        db.execute('BEGIN')
+        tx = db.execute('SELECT type,data,timestamp,block_height FROM transactions WHERE hash=?', (target,)).fetchone()
+        if tx is None or tx[3] is None: raise ValueError('Transaction is not committed')
+        block = db.execute('SELECT * FROM blocks WHERE height=?', (tx[3],)).fetchone()
+        if block is None: raise ValueError('Missing transaction block')
+        final = block_header(block)
+        proof = {'target_tx_hash': target, 'siblings': siblings(target, final['transactions'])}
+        # Preserve the exact transaction data bytes committed by its hash.
+        source_tx = '{"type":'+json.dumps(tx[0])+',"data":'+tx[1]+',"timestamp":'+str(tx[2])+'}'
+        if digest(source_tx) != target: raise ValueError('Source transaction content hash mismatch')
+        chain = [block_header(row) for row in db.execute('SELECT * FROM blocks WHERE height>? ORDER BY height DESC', (tx[3],))]
+    print(dump({'format': FORMAT, 'final_header': final, 'header_chain': chain,
+                'merkle_proof': proof, 'source_transaction': source_tx}))
+elif mode == 'verify':
+    encoded, anchor, destination = args
+    if not valid_hash(anchor): raise ValueError('Missing trusted checkpoint')
+    payload = load(base64.b64decode(encoded, validate=True).decode())
+    proof = payload['proof_data']
+    if proof['format'] != FORMAT: raise ValueError('Unsupported IBC proof format')
+    final = proof['final_header']
+    final_hash = check_header(final)
+    headers = proof['header_chain']
+    if not isinstance(headers, list): raise ValueError('Invalid header chain')
+    reached = final_hash == anchor
+    expected, expected_height, child_time = None, None, None
+    if not reached:
+        for header in headers:
+            block_hash = check_header(header)
+            if expected is None:
+                if block_hash != anchor: continue
+            elif block_hash != expected or header['height'] != expected_height or header['timestamp'] > child_time:
+                raise ValueError('Broken checkpoint history')
+            expected, expected_height, child_time = header['previous_hash'], header['height']-1, header['timestamp']
+            if expected == final_hash:
+                if final['height'] != expected_height or final['timestamp'] > child_time:
+                    raise ValueError('Invalid final block position')
+                reached = True
                 break
-            fi
-        done
-        
-        if [ "$target_index" -eq -1 ]; then echo "[]"; return 1; fi
+    if not reached: raise ValueError('Proof is not historical to the trusted checkpoint')
+    verify_merkle(final, proof['merkle_proof'])
+    target = proof['merkle_proof']['target_tx_hash']
+    if target not in final['transactions'] or payload['source_tx_hash'] != target:
+        raise ValueError('Source transaction binding mismatch')
+    raw_tx = proof['source_transaction']
+    if not isinstance(raw_tx, str) or digest(raw_tx) != target:
+        raise ValueError('Source transaction hash mismatch')
+    tx = load(raw_tx)
+    data = tx['data']
+    if tx['type'] != 'ibc_dispatch' or data['target_chain_id'] != destination:
+        raise ValueError('Wrong source transaction type or destination')
+    canonical = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+    if data['message_type'] != payload['message_type'] or canonical(data['message_payload']) != canonical(payload['message_payload']):
+        raise ValueError('Relayed message differs from committed source transaction')
+else:
+    raise ValueError('Unknown IBC codec mode')
+PY_IBC_CODEC
+}
 
-        local sibling_hash sibling_pos
-        if [ $((target_index % 2)) -eq 0 ]; then
-            sibling_pos="right"
-            if [ "$target_index" -lt $((${#hashes[@]} - 1)) ]; then
-                sibling_hash="${hashes[$((target_index + 1))]}"
-            else
-                sibling_hash="$target_hash"
-            fi
-        else
-            sibling_pos="left"
-            sibling_hash="${hashes[$((target_index - 1))]}"
-        fi
-
-        siblings_json=$(echo "$siblings_json" | jq --arg h "$sibling_hash" --arg p "$sibling_pos" '. + [{hash: $h, position: $p}]')
-
-        for ((i=0; i<${#hashes[@]}; i+=2)); do
-            local left="${hashes[$i]}"
-            local right=$([ "$i" -lt $((${#hashes[@]} - 1)) ] && echo "${hashes[$((i + 1))]}" || echo "$left")
-            local parent_hash=$(echo -n "${left}${right}" | sha256sum | awk '{print $1}')
-            next_level_hashes+=("$parent_hash")
-            if [ "$i" -eq "$((target_index / 2 * 2))" ]; then
-                target_hash="$parent_hash"
-            fi
-        done
-        
-        hashes=("${next_level_hashes[@]}")
-    done
-    echo "$siblings_json"
+_internal_generate_merkle_siblings() {
+    [ $# -ge 1 ] || return 1
+    _internal_ibc_codec siblings "$@"
 }
 
 _internal_ibc_generate_proof() {
-    local tx_hash="$1"
-    
-    local block_height block_hash
-    read -r block_height block_hash < <(db_query_safe "$BLOCKCHAIN_DB" \
-        "SELECT T.block_height, B.hash FROM transactions AS T JOIN blocks AS B ON T.block_height = B.height WHERE T.hash = %s;" \
-        "$tx_hash" | tr '|' ' ')
-
-    if [ -z "$block_height" ]; then
-        error "[IBC-GenProof] 交易未在链上找到 / Transaction not found on-chain: ${tx_hash}" >&2
-        echo "{}"
-        return 1
-    fi
-
-    local final_header_json
-    final_header_json=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT json_object('height', height, 'previous_hash', previous_hash, 'timestamp', timestamp, 'transactions_root', hash, 'validator', validator) FROM blocks WHERE hash = %s;" "$block_hash")
-
-    local header_chain_json
-    header_chain_json=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT json_group_array(json_object('height', height, 'previous_hash', previous_hash, 'timestamp', timestamp, 'transactions_root', hash, 'validator', validator)) FROM (SELECT * FROM blocks WHERE height < %d ORDER BY height DESC LIMIT 20);" "$block_height")
-
-    local -a tx_hashes_array=()
-    mapfile -t tx_hashes_array < <(db_query_safe "$BLOCKCHAIN_DB" "SELECT transactions FROM blocks WHERE height = %d;" "$block_height" | jq -r '.[]')
-    
-    local siblings_json
-    siblings_json=$(_internal_generate_merkle_siblings "$tx_hash" "${tx_hashes_array[@]}")
-    
-    local merkle_proof_json
-    merkle_proof_json=$(jq -n --arg th "$tx_hash" --argjson s "$siblings_json" '{target_tx_hash: $th, siblings: $s}')
-
-    jq -n \
-        --argjson fh "$final_header_json" \
-        --argjson hc "$header_chain_json" \
-        --argjson mp "$merkle_proof_json" \
-        '{final_header: $fh, header_chain: $hc, merkle_proof: $mp}'
+    [ $# -eq 1 ] || return 1
+    _internal_ibc_codec generate "$BLOCKCHAIN_DB" "$1"
 }
 
 _internal_ibc_mark_relayed() {
@@ -20757,192 +20839,23 @@ corix_trust() {
 # @return 0 on successful verification, 1 on failure.
 #         验证成功返回 0，失败返回 1。
 _internal_verify_merkle_proof() {
-    local final_header_json="$1"
-    local merkle_proof_json="$2"
-
-    # --- Step 1: Extract necessary data from JSON ---
-    # --- 步骤 1: 从JSON中提取必要数据 ---
-    local expected_root_hash target_tx_hash
-    expected_root_hash=$(echo "$final_header_json" | jq -r .transactions_root 2>/dev/null)
-    target_tx_hash=$(echo "$merkle_proof_json" | jq -r .target_tx_hash 2>/dev/null)
-
-    if [ -z "$expected_root_hash" ] || [ -z "$target_tx_hash" ]; then
-        warn "[MerkleVerify] 证明或区块头无效：缺少 'transactions_root' 或 'target_tx_hash'。" >&2
-        warn "[MerkleVerify] Invalid proof or header: Missing 'transactions_root' or 'target_tx_hash'." >&2
-        return 1
-    fi
-
-    # --- Step 2: Iteratively calculate the root hash from the proof ---
-    # --- 步骤 2: 从证明中迭代计算根哈希 ---
-    local calculated_hash="$target_tx_hash"
-    
-    # We use jq to iterate through the 'siblings' array.
-    # The '@base64' trick handles JSON objects with special characters safely.
-    # 我们使用 jq 来遍历 'siblings' 数组。'@base64' 技巧可以安全地处理包含特殊字符的JSON对象。
-    for sibling_b64 in $(echo "$merkle_proof_json" | jq -r '.siblings[] | @base64'); do
-        local sibling_json sibling_hash sibling_pos
-        sibling_json=$(echo "$sibling_b64" | base64 -d)
-        sibling_hash=$(echo "$sibling_json" | jq -r .hash)
-        sibling_pos=$(echo "$sibling_json" | jq -r .position)
-
-        # The core logic: concatenate the current hash and the sibling hash in the correct order, then hash the result.
-        # 核心逻辑：将当前哈希和兄弟哈希按正确顺序拼接，然后对结果进行哈希。
-        if [ "$sibling_pos" = "right" ]; then
-            calculated_hash=$(echo -n "${calculated_hash}${sibling_hash}" | sha256sum | awk '{print $1}')
-        elif [ "$sibling_pos" = "left" ]; then
-            calculated_hash=$(echo -n "${sibling_hash}${calculated_hash}" | sha256sum | awk '{print $1}')
-        else
-            warn "[MerkleVerify] 证明无效：'position' 必须是 'left' 或 'right'。 / Invalid proof: 'position' must be 'left' or 'right'." >&2
-            return 1
-        fi
-        detail "[MerkleVerify]  -> 中间哈希 / Intermediate hash: ${calculated_hash:0:32}..." >&2
-    done
-
-    # --- Step 3: Compare the calculated root with the expected root from the header ---
-    # --- 步骤 3: 将计算出的根哈希与区块头中的预期根哈希进行比较 ---
-    detail "[MerkleVerify] 最终计算出的根哈希 / Final calculated root: ${calculated_hash}" >&2
-    detail "[MerkleVerify] 区块头中期望的根哈希 / Expected root in header: ${expected_root_hash}" >&2
-    
-    if [ "$calculated_hash" = "$expected_root_hash" ]; then
-        info "[MerkleVerify] 默克尔证明验证成功！交易确实存在于区块中。" >&2
-        info "[MerkleVerify] Merkle proof verification SUCCESSFUL! Transaction is present in the block." >&2
-        return 0
-    else
-        warn "[MerkleVerify] 默克尔证明验证失败！计算出的根与区块头中的根不匹配。" >&2
-        warn "[MerkleVerify] Merkle proof verification FAILED! Calculated root does not match the header's root." >&2
-        return 1
-    fi
+    [ $# -eq 2 ] || return 1
+    _internal_ibc_codec merkle "$1" "$2"
 }
 
 # =======================================================================================
 # --- [IBC V1] 内置的“哈希链”证明验证器 (BUILT-IN "HASH-CHAIN" PROOF VERIFIER)        ---
 # =======================================================================================
-# This is the built-in, protocol-default verifier. It implements a simple but secure
-# proof system where a relayer provides a chain of block headers linking the new
-# transaction back to a previously known trusted header.
-#
-# 这是协议内置的默认验证器。它实现了一个简单但安全的证明系统：中继者提供一串
-# 区块头哈希链，将新交易链接回一个我们先前已知的、受信任的区块头。
-#
-# @param $1 - source_chain_id (The ID of the chain where the proof originates / 证明来源链的ID)
-# @param $2 - payload_and_proof_b64 (The full base64-encoded payload from the 'ibc_receive' tx)
-#             ('ibc_receive'交易中完整的、经过base64编码的载荷)
-# @return 0 on successful verification, 1 on failure.
-#         验证成功返回 0，失败返回 1。
+# The legacy hash-chain-v1 registry identifier now accepts CHECKPOINT_V2 proofs.
+# Governance must supply a trusted block hash at or after the transaction block.
+# Verifying descendants of an older anchor would require a separate consensus
+# proof; a previous_hash link alone cannot authenticate a new block.
 _internal_verify_hash_chain_proof() {
-    local source_chain_id="$1"
-    local payload_and_proof_b64="$2"
-
-    # --- Step 1: Decode and Parse the Proof ---
-    # --- 步骤 1: 解码并解析证明 ---
-    local payload_and_proof_json proof_data
-    payload_and_proof_json=$(echo "$payload_and_proof_b64" | base64 -d)
-    proof_data=$(echo "$payload_and_proof_json" | jq -c .proof_data 2>/dev/null)
-
-    if [ -z "$proof_data" ] || [ "$proof_data" = "null" ]; then
-        warn "[IBC-Verify] 证明验证失败: 'proof_data' 字段缺失或无效。" >&2
-        warn "[IBC-Verify] Proof verification failed: 'proof_data' field is missing or invalid." >&2
-        return 1
-    fi
-
-    # The proof must contain the final header (which includes the transaction) and a chain of previous headers.
-    # 证明中必须包含最终的区块头（包含了目标交易）和一串之前的区块头。
-    local final_header_json header_chain_json
-    final_header_json=$(echo "$proof_data" | jq -c .final_header 2>/dev/null)
-    header_chain_json=$(echo "$proof_data" | jq -c .header_chain 2>/dev/null)
-
-    if [ -z "$final_header_json" ] || [ -z "$header_chain_json" ]; then
-        warn "[IBC-Verify] 证明验证失败: 'final_header' 或 'header_chain' 字段缺失。" >&2
-        warn "[IBC-Verify] Proof verification failed: 'final_header' or 'header_chain' fields are missing." >&2
-        return 1
-    fi
-    
-    # --- Step 2: Retrieve the Local Trust Anchor ---
-    # --- 步骤 2: 获取本地的信任锚 ---
-    # The trust anchor is the hash of the last header we successfully verified from this source chain.
-    # 信任锚是我们已成功验证过的、来自该源链的最后一个区块头的哈希。
-    local last_known_header_hash
-    last_known_header_hash=$(db_query_safe "$BLOCKCHAIN_DB" \
-        "SELECT last_known_header_hash FROM ibc_verifiers WHERE target_chain_id = %s;" \
-        "$source_chain_id")
-
-    if [ -z "$last_known_header_hash" ]; then
-        warn "[IBC-Verify] 证明验证失败: 未找到源链 '${source_chain_id}' 的信任锚。请先通过治理初始化。 " >&2
-        warn "[IBC-Verify] Proof verification failed: No trust anchor found for source chain '${source_chain_id}'. Please initialize via governance." >&2
-        return 1
-    fi
-    detail "[IBC-Verify] 本地信任锚 / Local trust anchor: ${last_known_header_hash}" >&2
-
-    # --- Step 3: Verify the Hash Chain ---
-    # --- 步骤 3: 验证哈希链 ---
-    detail "[IBC-Verify] 正在验证哈希链... / Verifying hash chain..." >&2
-    local current_header_hash
-    current_header_hash=$(_internal_hash_text "$final_header_json")
-    
-    local previous_hash_in_header
-    previous_hash_in_header=$(echo "$final_header_json" | jq -r .previous_hash)
-
-    # Walk the chain backwards from the new header.
-    # 从新的区块头开始，向后遍历整个链。
-    local hash_chain_is_valid=false
-    for header_json_b64 in $(echo "$header_chain_json" | jq -r '.[] | @base64'); do
-        local header_json
-        header_json=$(echo "$header_json_b64" | base64 -d)
-        
-        local this_header_hash
-        this_header_hash=$(_internal_hash_text "$header_json")
-
-        if [ "$this_header_hash" = "$previous_hash_in_header" ]; then
-            # The chain is contiguous. Move to the next link.
-            # 链是连续的。移动到下一个环节。
-            previous_hash_in_header=$(echo "$header_json" | jq -r .previous_hash)
-            
-            # Check if we've reached our trust anchor.
-            # 检查我们是否已到达信任锚。
-            if [ "$this_header_hash" = "$last_known_header_hash" ]; then
-                hash_chain_is_valid=true
-                break
-            fi
-        else
-            # Chain is broken!
-            # 链断裂了！
-            break
-        fi
-    done
-
-    if ! $hash_chain_is_valid; then
-        warn "[IBC-Verify] 证明验证失败: 提供的哈希链无效或无法连接到本地信任锚。" >&2
-        warn "[IBC-Verify] Proof verification failed: The provided hash chain is invalid or does not connect to the local trust anchor." >&2
-        return 1
-    fi
-    
-    # --- [IBC V1.1] Step 4: Verify the Merkle Proof of Transaction Inclusion ---
-    # --- [IBC V1.1] 步骤 4: 验证交易包含性的默克尔证明 ---
-    local merkle_proof_json
-    merkle_proof_json=$(echo "$proof_data" | jq -c .merkle_proof 2>/dev/null)
-    if [ -z "$merkle_proof_json" ] || [ "$merkle_proof_json" = "null" ]; then
-        warn "[IBC-Verify] 证明中缺少默克尔证明部分 ('merkle_proof')。 / 'merkle_proof' section is missing from the proof." >&2
-        # Depending on the protocol, this could be a failure or an optional step. We'll treat it as a failure.
-        # 根据协议，这可能是失败，也可能是可选步骤。我们将其视为失败。
-        return 1
-    fi
-    
-    # Call the new Merkle verifier function. If it fails, the whole proof fails.
-    # 调用新的默克尔验证函数。如果它失败了，则整个证明都失败。
-    if ! _internal_verify_merkle_proof "$final_header_json" "$merkle_proof_json"; then
-        return 1
-    fi
-    
-    # --- Step 5: Update the Trust Anchor ---
-    # --- 步骤 5: 更新信任锚 ---
-    # If the proof is valid, the new header becomes our new trust anchor for the next proof.
-    # 如果证明有效，新的区块头就成为我们验证下一个证明时的新信任锚。
-    info "[IBC-Verify] 证明验证成功！正在更新信任锚... / Proof verified successfully! Updating trust anchor..." >&2
-    db_execute_safe "$BLOCKCHAIN_DB" \
-        "UPDATE ibc_verifiers SET last_known_header_hash = %s WHERE target_chain_id = %s;" \
-        "$current_header_hash" "$source_chain_id"
-
-    return 0
+    [ $# -eq 2 ] || return 1
+    local anchor
+    anchor=$(db_query_safe "$BLOCKCHAIN_DB" \
+        "SELECT last_known_header_hash FROM ibc_verifiers WHERE target_chain_id = %s AND is_active = 1;" "$1") || return 1
+    _internal_ibc_codec verify "$2" "$anchor" "$CORIUM_NETWORK_ID"
 }
 
 # =======================================================================================
@@ -21011,155 +20924,30 @@ EOF
 # =======================================================================================
 usage_ibc_proof_format() {
 cat <<'EOF'
+Corium IBC proof format: CORIUM_IBC_CHECKPOINT_V2
 
-================================================================================
-  Corium IBC: 中继者证明数据 (proof_data) 格式规范 v1.1
-  Corium IBC: Relayer Proof Data (proof_data) Format Specification v1.1
-================================================================================
+proof_data fields:
+  format: "CORIUM_IBC_CHECKPOINT_V2"
+  final_header: height, hash, previous_hash, timestamp, transactions,
+                transactions_root, validator, signature
+  header_chain: newer blocks in descending height order, leading from a
+                governance-trusted checkpoint back to final_header
+  merkle_proof: target_tx_hash and siblings ({hash, position: left|right})
+  source_transaction: exact signed/hashed transaction payload as a JSON string
 
-本文档为中继者 Agent (Relayer Agent) 的开发者提供技术指南，详细说明了在构造
-ibc_receive 交易时，proof_data 字段所需遵循的 JSON 格式。
-This document provides a technical guide for Relayer Agent developers, detailing
-the required JSON format for the proof_data field when constructing an
-ibc_receive transaction.
+The block hash commits to {height,previous_hash,timestamp,transactions} in that
+order with compact JSON. transactions_root is computed separately by SHA-256
+pairing and duplicating an odd final node; an empty block uses SHA-256("").
 
-一个有效的 proof_data 对象必须能够让目标链（例如 chain_B）无需信任地验证
-某个交易确实发生在源链（例如 chain_A）上。
-A valid proof_data object must allow the destination chain (e.g., chain_B) to
-trustlessly verify that a specific transaction did indeed occur on the source
-chain (e.g., chain_A).
+The trusted checkpoint must be final_header.hash or a newer supplied block hash.
+Its ancestor links authenticate the historical final block and transaction list.
+The source transaction must be ibc_dispatch and bind the destination network,
+message_type and message_payload. Merkle root and source_tx_hash must also match.
 
---------------------------------------------------------------------------------
-JSON 结构概览 (JSON Structure Overview)
---------------------------------------------------------------------------------
-
-proof_data 是一个 JSON 对象，其顶级结构如下:
-proof_data is a JSON object with the following top-level structure:
-
-{
-  "final_header": { ... },
-  "header_chain": [ ... ],
-  "merkle_proof": { ... }
-}
-
---------------------------------------------------------------------------------
-1. final_header (对象, 必须 / Object, Required)
---------------------------------------------------------------------------------
-
-此对象包含了包含了我们想要证明的目标交易 (target_tx_hash) 的那个区块的
-完整区块头。
-This object contains the complete block header of the block that includes the
-target transaction (target_tx_hash) we want to prove.
-
-*   **格式 / Format**:
-    一个标准的 Corium 区块头 JSON 对象。
-    A standard Corium block header JSON object.
-
-*   **关键字段 / Key Fields**:
-    - height: (number) 区块高度 / The block height.
-    - previous_hash: (string) 前一个区块的哈希 / The hash of the previous block.
-    - timestamp: (number) 时间戳 / The timestamp.
-    - transactions_root: (string) **(核心)** 该区块所有交易的默克尔树根哈希。
-                           **(CORE)** The Merkle root hash of all transactions in this block.
-    - ... (其他区块头字段 / other block header fields)
-
-*   **示例 / Example**:
-    "final_header": {
-      "height": 12345,
-      "previous_hash": "abc...",
-      "timestamp": 1678886400,
-      "transactions_root": "deadbeef...",
-      "validator": "def..."
-    }
-
---------------------------------------------------------------------------------
-2. header_chain (数组, 必须 / Array, Required)
---------------------------------------------------------------------------------
-
-这是一个区块头对象的有序数组，它构成了从 final_header 指向的前一个区块，
-一直回溯到目标链（chain_B）已知的上一个信任锚（last_known_header_hash）
-的哈希链。
-This is an ordered array of block header objects, forming a hash chain from the
-block preceding final_header back to the last known trust anchor
-(last_known_header_hash) on the destination chain (chain_B).
-
-*   **顺序 / Order**: 数组中的第一个元素是 final_header.previous_hash 对应的区块头，
-    最后一个元素必须是其哈希等于目标链信任锚的那个区块头的前一个区块头。
-    The first element in the array is the header for final_header.previous_hash.
-    The last element's hash must be the previous_hash of the block that matches
-    the trust anchor on the destination chain.
-
-*   **示例 / Example**:
-    "header_chain": [
-      { "height": 12344, "previous_hash": "bcd...", ... }, // Corresponds to final_header.previous_hash
-      { "height": 12343, "previous_hash": "cde...", ... },
-      ...
-      { "height": 12301, "previous_hash": "xyz...", ... }  // The block before the known anchor
-    ]
-
---------------------------------------------------------------------------------
-3. merkle_proof (对象, 必须 / Object, Required)
---------------------------------------------------------------------------------
-
-此对象提供了密码学证明，证实 target_tx_hash 确实是构成 final_header 中
-transactions_root 的一部分。
-This object provides the cryptographic proof that target_tx_hash is indeed a
-part of the transactions_root found in the final_header.
-
-*   **target_tx_hash (字符串, 必须 / String, Required)**:
-    您想要证明其存在性的那笔交易的 SHA256 哈希。
-    The SHA256 hash of the transaction whose existence you want to prove.
-
-*   **siblings (数组, 必须 / Array, Required)**:
-    一个“兄弟哈希”对象的有序列表，从默克尔树的叶子层开始，逐层向上。
-    An ordered list of "sibling hash" objects, starting from the leaf level of
-    the Merkle tree and moving upwards.
-
-*   **兄弟哈希对象格式 / Sibling Hash Object Format**:
-    {
-      "hash": "...",     // (string) 兄弟节点的哈希 / The hash of the sibling node.
-      "position": "..."  // (string) "left" 或 "right"，指示在拼接时，
-                         //          此兄弟哈希应位于当前计算哈希的哪一侧。
-                         //          "left" or "right", indicating on which side of the
-                         //          current calculated hash this sibling should be concatenated.
-    }
-
-*   **示例 / Example**:
-    "merkle_proof": {
-      "target_tx_hash": "tx_hash_of_interest",
-      "siblings": [
-        { "hash": "sibling_at_level_0", "position": "right" },
-        { "hash": "sibling_at_level_1", "position": "left"  },
-        { "hash": "sibling_at_level_2", "position": "right" }
-      ]
-    }
-
---------------------------------------------------------------------------------
-验证逻辑摘要 (Verification Logic Summary)
---------------------------------------------------------------------------------
-
-当 chain_B 收到这份 proof_data 时，它会执行以下验证：
-When chain_B receives this proof_data, it will perform the following verifications:
-
-1.  **验证哈希链 (Verify Hash Chain)**: 从 final_header 开始，使用 header_chain
-    数组，通过 previous_hash 字段一路计算和比对哈希，确保它能成功连接到
-    chain_B 数据库中记录的、关于 chain_A 的 last_known_header_hash。
-    Starting from final_header, it will use the header_chain array to
-    calculate and compare hashes via the previous_hash field, ensuring a
-    successful connection to the last_known_header_hash for chain_A recorded
-    in chain_B's database.
-
-2.  **验证默克尔证明 (Verify Merkle Proof)**:
-    a. 以 target_tx_hash 作为初始哈希。
-    b. 遍历 siblings 数组，根据 position 拼接哈希并重新计算 SHA256。
-    c. 最终计算出的根哈希，必须与 final_header 中的 transactions_root 完全匹配。
-
-只有当以上所有验证都通过时，ibc_receive 交易才会被接受，其内部的跨链
-消息才会被处理。
-Only when all the above verifications pass will the ibc_receive transaction be
-accepted and its internal cross-chain message be processed.
-
-================================================================================
+The legacy BUILT_IN:hash-chain-v1 identifier remains registered, but old proof
+objects are rejected. Proofs do not advance the checkpoint. Governance must
+update checkpoints independently; validators' consensus is not inferred from
+an unauthenticated chain of descendants.
 EOF
 }
 
