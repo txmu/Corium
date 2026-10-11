@@ -88,7 +88,11 @@ class Network(unittest.TestCase):
 
     def test_real_upnp_igd_discovery_and_all_three_production_port_mappings(self):
         config=pathlib.Path(os.environ['RUNNER_TEMP'])/'miniupnpd.conf'
-        config.write_text('ext_ifname=wan0\next_allow_private_ipv4=yes\nlistening_ip=10.81.1.1\nenable_upnp=yes\nenable_natpmp=yes\nsecure_mode=yes\nsystem_uptime=yes\nuuid=12345678-1234-1234-1234-123456789abc\nallow 1024-65535 10.81.1.0/24 1024-65535\n')
+        config.write_text('ext_ifname=wan0\next_ip=198.18.0.1\nlistening_ip=10.81.1.1\nenable_upnp=yes\nenable_natpmp=yes\nsecure_mode=yes\nsystem_uptime=yes\nuuid=12345678-1234-1234-1234-123456789abc\nallow 1024-65535 10.81.1.0/24 1024-65535\n')
+        # miniupnpd needs its chains in this router namespace, independently of the host service.
+        self.router('set -e\niptables -N MINIUPNPD\niptables -A FORWARD -j MINIUPNPD\n'
+                    'iptables -t nat -N MINIUPNPD\niptables -t nat -A PREROUTING -j MINIUPNPD\n'
+                    'iptables -t nat -N MINIUPNPD-POSTROUTING\niptables -t nat -A POSTROUTING -j MINIUPNPD-POSTROUTING')
         stream=pathlib.Path('ci-logs/upnp-router.log').open('w'); self.addCleanup(stream.close)
         proc=subprocess.Popen(['ip','netns','exec','corium-router','miniupnpd','-d','-f',str(config)],stdout=stream,stderr=stream,start_new_session=True)
         self.addCleanup(self.stop,proc); time.sleep(2); self.assertIsNone(proc.poll())

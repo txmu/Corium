@@ -1,5 +1,6 @@
 """Actual Btrfs/ZFS product snapshot lifecycle on disposable loopback storage."""
 import os
+from contextlib import closing
 import pathlib
 import shutil
 import sqlite3
@@ -58,12 +59,12 @@ class Filesystems(Fixture):
     def test_product_rollback_restores_database_configuration_and_installed_state(self):
         self.native_reference_snapshot()
         (self.etc/'world').write_text('#changed\n')
-        with sqlite3.connect(self.chain) as db: db.execute('DELETE FROM validators')
+        with closing(sqlite3.connect(self.chain)) as db, db: db.execute('DELETE FROM validators')
         self.run_core('corix_snapshot_rollback native <<< y')
         self.assertEqual(self.semantic(),self.expected)
         self.assertEqual((self.etc/'world').read_text(),'')
         for path in (self.chain,self.forum,self.dht):
-            with sqlite3.connect(path) as db: self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+            with closing(sqlite3.connect(path)) as db: self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0],'ok')
 
     def test_product_delete_destroys_real_snapshot(self):
         target=self.native_reference_snapshot()

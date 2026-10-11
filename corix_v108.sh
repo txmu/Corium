@@ -3349,36 +3349,59 @@ def get_our_node_id():
 
 # --- NAT 穿透函数 / NAT Traversal Functions ---
 def discover_public_address():
-    if not PYSTUN3_AVAILABLE:
-        # ... (保持不变)
-        return
-
+    # RFC 8489 Binding discovers a mapped endpoint without legacy NAT probing.
+    # Bound retries and validate the transaction ID before accepting a response.
+    import struct
     global PUBLIC_IP, PUBLIC_PORT, NAT_TYPE
-    stun_servers_str = os.environ.get("CORIUM_STUN_SERVERS", "")
-    if not stun_servers_str: return
-
-    bilingual_print("Discovering public IP address via STUN...", "正在通过STUN发现公网IP地址...", "INFO")
-    for server in stun_servers_str.split(','):
+    servers = os.environ.get("CORIUM_STUN_SERVERS", "")
+    cookie = 0x2112A442
+    for server in servers.split(','):
+        if not server.strip(): continue
         try:
-            host, port_str = server.strip().split(':')
-            port = int(port_str)
-            
-            # --- [V103 最终修复 - 兼容 pystun3 API 变体] ---
-            # 我们直接调用最有可能成功的、带参数的版本。
-            # We directly call the version with arguments, which is most likely to succeed.
-            # 源码显示它需要一个 socket 对象 's'，但通常可以传 None 让它自己创建。
-            # The source shows it needs a socket object 's', but passing None often lets it create its own.
-            nat_type, external_ip, external_port = pystun3.get_ip_info(source_ip='0.0.0.0', source_port=0, stun_host=host, stun_port=port)
-            
-            if external_ip and external_port:
-                PUBLIC_IP, PUBLIC_PORT, NAT_TYPE = external_ip, external_port, nat_type
-                bilingual_print(f"STUN success! Public address: {PUBLIC_IP}:{PUBLIC_PORT}, NAT Type: {NAT_TYPE}", f"STUN成功！公网地址: {PUBLIC_IP}:{PUBLIC_PORT}, NAT类型: {NAT_TYPE}", "OK")
-                return
-        except Exception as e:
-            bilingual_print(f"STUN query to {server} failed: {e}", f"对 {server} 的STUN查询失败: {e}", "DEBUG")
-
+            host, port = server.strip().rsplit(':', 1)
+            address = socket.getaddrinfo(host.strip('[]'), int(port), type=socket.SOCK_DGRAM)[0]
+            family, socktype, protocol, _, endpoint = address
+            with socket.socket(family, socktype, protocol) as client:
+                client.connect(endpoint)
+                transaction = os.urandom(12)
+                request = struct.pack('!HHI', 1, 0, cookie) + transaction
+                for retry in range(3):
+                    client.settimeout(0.5 * (2 ** retry))
+                    client.send(request)
+                    deadline = time.monotonic() + 0.5 * (2 ** retry)
+                    while time.monotonic() < deadline:
+                        client.settimeout(max(0.001, deadline-time.monotonic()))
+                        try: response = client.recv(65535)
+                        except socket.timeout: break
+                        if len(response) < 20: continue
+                        kind, size, received_cookie = struct.unpack('!HHI', response[:8])
+                        if kind != 0x0101 or received_cookie != cookie or response[8:20] != transaction: continue
+                        if size % 4 or len(response) != 20 + size: continue
+                        offset = 20
+                        while offset + 4 <= len(response):
+                            attribute, length = struct.unpack('!HH', response[offset:offset+4])
+                            value = response[offset+4:offset+4+length]
+                            offset += 4 + ((length + 3) // 4) * 4
+                            if len(value) != length or offset > len(response): break
+                            if attribute not in (0x0020, 0x0001) or length < 4: continue
+                            ip_family = value[1]
+                            width = 4 if ip_family == 1 else 16 if ip_family == 2 else 0
+                            if not width or length != 4 + width: continue
+                            mapped_port = int.from_bytes(value[2:4], 'big')
+                            raw_ip = value[4:]
+                            if attribute == 0x0020:
+                                mapped_port ^= cookie >> 16
+                                mask = struct.pack('!I', cookie) + transaction
+                                raw_ip = bytes(a ^ b for a, b in zip(raw_ip, mask))
+                            if not mapped_port: continue
+                            PUBLIC_IP = socket.inet_ntop(socket.AF_INET if width == 4 else socket.AF_INET6, raw_ip)
+                            PUBLIC_PORT, NAT_TYPE = mapped_port, 'Unknown'
+                            bilingual_print(f"STUN success! Public address: {PUBLIC_IP}:{PUBLIC_PORT}", f"STUN成功！公网地址: {PUBLIC_IP}:{PUBLIC_PORT}", "OK")
+                            return
+        except (OSError, ValueError, struct.error) as error:
+            bilingual_print(f"STUN query to {server} failed: {error}", f"对 {server} 的STUN查询失败: {error}", "DEBUG")
     bilingual_print("Failed to discover public IP via any STUN server.", "通过所有STUN服务器发现公网IP均失败。", "WARN")
-    
+
 def setup_automatic_port_forwarding():
     if not MINIUPNPC_AVAILABLE or os.environ.get("CORIUM_ENABLE_UPNP", "false").lower() != 'true':
         return
@@ -4778,9 +4801,11 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                 data = parse_protocol_json(post_data)
                 response_data = self.handle_dht_message(data)
                 self.send_response(200)
+                response_bytes = json.dumps(response_data).encode('utf-8')
                 self.send_header('Content-type', 'application/json')
+                self.send_header('Content-Length', str(len(response_bytes)))
                 self.end_headers()
-                self.wfile.write(json.dumps(response_data).encode('utf-8'))
+                self.wfile.write(response_bytes)
             except (ValueError, UnicodeError, TimeoutError): self.send_error(400, "Malformed request")
             except Exception: self.send_error(500, "Internal Server Error")
         else: self.send_error(404, "Not Found")
@@ -8892,7 +8917,9 @@ corix_manage_sync() {
             check_dep xbps-query
             info "正在查询 xbps 数据库... (Querying xbps database...)"
             xbps-query -l | while read -r line; do
-                local pkgver_str="${line%% *}"
+                local status pkgver_str remainder
+                read -r status pkgver_str remainder <<< "$line"
+                [ "$status" = ii ] || continue
                 local pkgname="${pkgver_str%-*}"
                 local version="${pkgver_str##*-}"
                 echo -e "${pkgname}\t${version}\tinstalled\txbps"
@@ -8917,7 +8944,7 @@ corix_manage_sync() {
         pkgsrc)
             check_dep pkg_info
             info "正在查询 pkgsrc 数据库... (Querying pkgsrc database...)"
-            pkg_info | while read -r line; do
+            pkg_info -q -a | while read -r line; do
                 local pkgname="${line%-*}"
                 local version="${line##*-}"
                 echo -e "${pkgname}\t${version}\tinstalled\tpkgsrc"
@@ -12419,6 +12446,7 @@ get_pkg_id_parts() {
         PKG_SUBSLOT="${slot_part##*/}"
         [ "$PKG_SUBSLOT" == "$PKG_SLOT" ] && PKG_SUBSLOT="0"
     fi
+    return 0
 }
 
 
@@ -13026,7 +13054,7 @@ dep_resolve_topological() {
             if [ "$is_initial" -eq 0 ] && [ "${CORIUM_DEP_RESOLVE_ALL:-0}" != 1 ]; then continue; fi
         fi
 
-        [[ "$pkg" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+/-]*:[a-zA-Z0-9._+-]+$ ]] || return 1
+        [[ "$pkg" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+/-]*:[a-zA-Z0-9._+-]+(/[a-zA-Z0-9._+-]+)?$ ]] || return 1
         local meta
         meta=$(_get_pkg_meta_from_cache "$pkg") || return 1
         [ -z "$meta" ] && error "无法解析 '${pkg}': 在元数据缓存中未找到。请运行 'corix sync'。 / Cannot resolve '${pkg}': not found in metadata cache. Please run 'corix sync'."
@@ -13053,7 +13081,7 @@ dep_resolve_topological() {
                     dep="${dep}:0"
                 fi
 
-                [[ "$dep" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+/-]*:[a-zA-Z0-9._+-]+$ ]] || return 1
+                [[ "$dep" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+/-]*:[a-zA-Z0-9._+-]+(/[a-zA-Z0-9._+-]+)?$ ]] || return 1
                 if [ -z "${initial_set[$dep]+set}" ] && [ "${CORIUM_DEP_RESOLVE_ALL:-0}" != 1 ] && { db_is_installed "$dep" || dep_check_external "$dep"; }; then continue; fi
                 [ -z "${edges[$dep|$pkg]+set}" ] || continue
                 edges["$dep|$pkg"]=1
@@ -13183,7 +13211,7 @@ corix_wiki() {
             done
             ;;
         create)
-            local group_slug file_path commit_message attachment_dir
+            local group_slug="" file_path="" commit_message="" attachment_dir=""
             group_slug="${1:-}"; shift || true
             while [ $# -gt 0 ]; do
                 case "$1" in
@@ -13224,7 +13252,7 @@ corix_wiki() {
             ;;
         show)
             [ $# -lt 1 ] && { usage_wiki; exit 1; }
-            local group_slug="${1:-}"; local version_hash="${2#--version=}"
+            local group_slug="${1:-}"; local version_hash="${2:-}"; version_hash="${version_hash#--version=}"
             local group_id="${group_slug%/*}"; local page_slug="${group_slug#*/}"
             
             local content_hash author timestamp commit_message
@@ -13250,7 +13278,7 @@ corix_wiki() {
             local temp_content_file
             temp_content_file=$(mktemp)
             CORIUM_TEMP_ITEMS+=("$temp_content_file")
-            if _p2p_download_object "$content_hash" "$temp_content_file"; then
+            if _download_file_p2p "$content_hash" "$temp_content_file"; then
                 cat "$temp_content_file"
             else
                 error "无法下载页面内容。/ Failed to download page content."
@@ -14765,23 +14793,11 @@ _execute_mod_in_sandbox() {
     detail "[SANDBOX] 正在从文件清单构建只读根文件系统... / Building read-only rootfs from file manifest..."
     get_pkg_id_parts "$pkg_id"
     local pkg_name_full="${PKG_CATEGORY}/${PKG_NAME}"
-    local file_manifest; file_manifest=$(db_get_package_files "$pkg_name_full" "$PKG_SLOT")
-
-    if [[ -n "$file_manifest" ]]; then
-        while IFS= read -r file_entry; do
-            [ -n "$file_entry" ] || continue
-            local full_path="${CORIUM_ROOT%/}/${file_entry}"
-            [ -e "$full_path" ] && bwrap_args+=(--ro-bind "$full_path" "$full_path")
-        done <<< "$file_manifest"
-    else
-        warn "[SANDBOX] 警告：无法获取 Mod '${pkg_id}' 的文件清单。/ WARNING: Could not get file manifest for Mod '${pkg_id}'."
-    fi
+    local file_manifest; file_manifest=$(db_get_package_files "$pkg_name_full" "$PKG_SLOT") || file_manifest=""
 
     # --- 3b. 绑定一个最小化的、只读的基础系统环境 ---
     # --- 3b. Bind a minimal, read-only base system environment ---
     bwrap_args+=(--ro-bind /usr /usr --ro-bind /bin /bin)
-    # Downloaded, hash-verified compute executables may be outside installed manifests.
-    bwrap_args+=(--ro-bind "$executable_path" "$executable_path")
     [ -d /lib ] && bwrap_args+=(--ro-bind /lib /lib)
     [ -d /lib64 ] && bwrap_args+=(--ro-bind /lib64 /lib64)
     
@@ -14798,6 +14814,27 @@ _execute_mod_in_sandbox() {
         *)
             bwrap_args+=(--tmpfs /tmp) ;;
     esac
+
+    if [[ -n "$file_manifest" ]]; then
+        while IFS= read -r file_entry; do
+            [ -n "$file_entry" ] || continue
+            local full_path="${CORIUM_ROOT%/}/${file_entry}"
+            [ -e "$full_path" ] && bwrap_args+=(--ro-bind "$full_path" "$full_path")
+        done <<< "$file_manifest"
+    else
+        warn "[SANDBOX] 警告：无法获取 Mod '${pkg_id}' 的文件清单。/ WARNING: Could not get file manifest for Mod '${pkg_id}'."
+    fi
+
+    # Mount the executable after temporary filesystems so /tmp paths remain visible.
+    local executable_real_path
+    executable_real_path=$(readlink -f -- "$executable_path") || return 1
+    bwrap_args+=(--ro-bind "$executable_real_path" "$executable_real_path")
+    if [ "$executable_real_path" != "$executable_path" ]; then
+        case "$executable_path" in
+            /usr/*|/bin/*|/sbin/*|/lib/*|/lib64/*) : ;; # Host bindings already contain these symlinks.
+            *) bwrap_args+=(--symlink "$executable_real_path" "$executable_path") ;;
+        esac
+    fi
 
     # --- 3d. Generic Data Vault Mounting Logic from V72 ---
     # --- 3d. 通用的数据保险库挂载逻辑（来自V72） ---
@@ -15218,7 +15255,7 @@ else
     # 否则，执行我们全新的、智能的 prepare() 逻辑
     echo "=> Running smart prepare()..."
     # 查找 srcdir 下解压后的一级目录
-    local subdirs=(\$(find . -mindepth 1 -maxdepth 1 -type d))
+    subdirs=(\$(find . -mindepth 1 -maxdepth 1 -type d))
     if [ \${#subdirs[@]} -eq 1 ]; then
         echo "--> Found single source directory: \${subdirs[0]}. Changing into it."
         cd "\${subdirs[0]}"
@@ -15248,13 +15285,13 @@ EOF
     
     # 等待构建进程结束并获取其退出码
     # Wait for the build process to finish and get its exit code
-    wait $build_pid
-    local build_exit_code=$?
+    local build_exit_code=0
+    wait "$build_pid" || build_exit_code=$?
     if [ "$build_exit_code" -eq 0 ]; then
         info "Build phase completed successfully / 构建阶段成功完成"
     else
         echo
-        error "Build failed for '$pkg_name_full'! / 软件包 '$pkg_name_full' 构建失败！"
+        warn "Build failed for '$pkg_name_full'! / 软件包 '$pkg_name_full' 构建失败！"
         info "--- [TAIL OF BUILD LOG / 构建日志尾部] ---"
         tail -n 20 "$build_log"
         info "--- [END OF LOG / 日志结束] ---"
@@ -15265,8 +15302,9 @@ EOF
     fi
     
     info "正在创建二进制包... / Creating binary package..."
-    local binary_pkg_name="${pkgname//\//_}-${pkgver}-${slot}-$(uname -m).corix.tar.zst"
-    local binary_pkg_path="${BINARY_CACHE}/${binary_pkg_name}"
+    local pkg_cache_name="${pkg_name_full%%:*}" pkg_cache_slot="${slot//\//_}"
+    local binary_pkg_name="${pkg_cache_name//\//_}-${pkgver}-${pkg_cache_slot}-$(uname -m).corix.tar.zst"
+    local built_pkg_path="${BINARY_CACHE}/${binary_pkg_name}"
     local files_manifest="$build_dir/manifest.txt"
     
     (cd "$pkg_dir" && find . -type f -o -type l | sed 's|^\./||' | sort) > "$files_manifest"
@@ -15297,21 +15335,21 @@ EOF
         total_size=$(du -sb "$pkg_dir" | awk '{print $1}')
         
         if command -v zstd >/dev/null 2>&1; then
-            tar -C "$pkg_dir" -cf - . | pv -p -t -e -r -b -s "$total_size" 2>/dev/tty 2>/dev/tty | zstd -q -T0 -3 -f -o "$binary_pkg_path"
+            tar -C "$pkg_dir" -cf - . | pv -p -t -e -r -b -s "$total_size" 2>/dev/tty 2>/dev/tty | zstd -q -T0 -3 -f -o "$built_pkg_path"
         else
-            binary_pkg_path="${BINARY_CACHE}/${pkgname//\//_}-${pkgver}-${slot}-$(uname -m).corix.tar.gz"
-            tar -C "$pkg_dir" -cf - . | pv -p -t -e -r -b -s "$total_size" 2>/dev/tty 2>/dev/tty | gzip > "$binary_pkg_path"
+            built_pkg_path="${BINARY_CACHE}/${pkg_cache_name//\//_}-${pkgver}-${pkg_cache_slot}-$(uname -m).corix.tar.gz"
+            tar -C "$pkg_dir" -cf - . | pv -p -t -e -r -b -s "$total_size" 2>/dev/tty 2>/dev/tty | gzip > "$built_pkg_path"
         fi
     else
         # 方案 B: 回退到 spinner 动画
         info "正在打包 (pv 未找到，使用 spinner)... / Packaging (pv not found, using spinner)..."
         local tar_pid
         if command -v zstd >/dev/null 2>&1; then
-            (tar -C "$pkg_dir" -cf - . | zstd -q -T0 -3 -f -o "$binary_pkg_path") &
+            (tar -C "$pkg_dir" -cf - . | zstd -q -T0 -3 -f -o "$built_pkg_path") &
             tar_pid=$!
         else
-            binary_pkg_path="${BINARY_CACHE}/${pkgname//\//_}-${pkgver}-${slot}-$(uname -m).corix.tar.gz"
-            (tar -C "$pkg_dir" -czf "$binary_pkg_path" .) &
+            built_pkg_path="${BINARY_CACHE}/${pkg_cache_name//\//_}-${pkgver}-${pkg_cache_slot}-$(uname -m).corix.tar.gz"
+            (tar -C "$pkg_dir" -czf "$built_pkg_path" .) &
             tar_pid=$!
         fi
         _spinner $tar_pid
@@ -15320,7 +15358,7 @@ EOF
     # --- [新增逻辑结束] ---
     
     local pkg_hash signature
-    pkg_hash=$(calculate_hash "$binary_pkg_path")
+    pkg_hash=$(calculate_hash "$built_pkg_path")
     
     # --- [V98 核心修改] GPG 签名逻辑 ---
     # --- [V98 CORE MODIFICATION] GPG Signing Logic ---
@@ -15336,7 +15374,7 @@ EOF
             # --detach-sign 创建分离的签名文件
             # --armor 创建 ASCII 格式的输出
             # -u 指定使用的密钥
-            if ! gpg --batch --yes --detach-sign --armor -u "${GPG_SIGNING_KEY}" -o "${binary_pkg_path}.sig.gpg" "$binary_pkg_path"; then
+            if ! gpg --batch --yes --detach-sign --armor -u "${GPG_SIGNING_KEY}" -o "${built_pkg_path}.sig.gpg" "$built_pkg_path"; then
                 error "GPG 签名失败！请检查您的 GPG 环境和密钥密码。/ GPG signing failed! Please check your GPG environment and key password."
                 # 即使签名失败，构建本身也算成功了，但我们返回一个错误码以示警告
                 # Even if signing fails, the build itself succeeded, but we return an error code as a warning
@@ -15355,16 +15393,16 @@ EOF
     blockchain_register_package "$pkg_name_full" "$pkgver" "$pkg_hash" "$build_hash" >/dev/null
     
     info "Sharing binary package via P2P network... / 正在通过P2P网络共享二进制包..."
-    p2p_split_file "$binary_pkg_path" >/dev/null || true
+    p2p_split_file "$built_pkg_path" >/dev/null || true
     
-    msg "Build successful: $binary_pkg_path / 构建成功: $binary_pkg_path"
+    msg "Build successful: $built_pkg_path / 构建成功: $built_pkg_path"
     
-    _run_hooks "post-build" "$binary_pkg_path" >&2
+    _run_hooks "post-build" "$built_pkg_path" >&2
     
     CORIUM_TEMP_ITEMS+=("$build_dir")
     
     release_lock
-    result_var="$binary_pkg_path"
+    result_var="$built_pkg_path"
 }
 
 
@@ -15708,9 +15746,10 @@ corix_install() {
             msg "[CANARY] Allowing installation of canary release: $pkgver / [金丝雀版本] 允许安装金丝雀版本: $pkgver"
         fi
         
-        local binary_pkg_name="${pkg_name//\//_}-${pkgver}-${PKG_SLOT}-$(uname -m).corix.tar.zst"
+        local pkg_cache_slot="${pkg##*:}"; pkg_cache_slot="${pkg_cache_slot//\//_}"
+        local binary_pkg_name="${pkg_name//\//_}-${pkgver}-${pkg_cache_slot}-$(uname -m).corix.tar.zst"
         local binary_pkg_path="${BINARY_CACHE}/${binary_pkg_name}"
-        local alt_pkg_path="${BINARY_CACHE}/${pkg_name//\//_}-${pkgver}-${PKG_SLOT}-$(uname -m).corix.tar.gz"
+        local alt_pkg_path="${BINARY_CACHE}/${pkg_name//\//_}-${pkgver}-${pkg_cache_slot}-$(uname -m).corix.tar.gz"
         
         # Try zstd compressed first, then gzipped
         if [ ! -f "$binary_pkg_path" ] && [ -f "$alt_pkg_path" ]; then
@@ -15869,7 +15908,7 @@ _get_local_acl_permission() {
     local key="$1"
     local mod_name="$2"
     local acl_file="${ETC_CORIUM_DIR}/local_acl.conf"
-    [ ! -f "$acl_file" ] && return
+    [ ! -f "$acl_file" ] && return 0
     awk -v mod="[mod:${mod_name}]" -v key="${key}" '
         $0 == mod { in_section=1; next }
         /\[.*\]/ { in_section=0 }
@@ -15896,7 +15935,7 @@ _get_mod_metadata_value() {
     # 调用新的解析器，并 grep 特定的键。
     # 输出格式会是 "key=value1 value2 ..."。
     # 我们接着切掉 "key=" 的部分。
-    _parse_build_file "$build_file" | grep "^${key_to_find}=" | cut -d'=' -f2-
+    _parse_build_file "$build_file" | awk -F= -v key="$key_to_find" '$1==key {sub(/^[^=]*=/, ""); print}'
 }
 
 
@@ -16798,7 +16837,9 @@ corix_strata_execute() {
         pm=$(grep '^pm=' "$strata_conf" | cut -d= -f2)
     fi
 
-    msg "Executing in strata '$strata_name' ($pm): $*"
+    local strata_command
+    if [ $# -eq 1 ]; then strata_command="$1"; else printf -v strata_command '%q ' "$@"; fi
+    msg "Executing in strata '$strata_name' ($pm): $strata_command"
 
     # Decide sandbox tool (prefer bwrap, fallback to chroot)
     local tool="${SANDBOX_TOOL:-auto}"
@@ -16900,7 +16941,7 @@ corix_strata_execute() {
             bwrap "${bind_opts[@]}" \
                   "${env_opts[@]}" \
                   --chdir "$_cwd" \
-                  "$_shell" -lc "$*"
+                  "$_shell" -c "$strata_command"
             ;;
         chroot)
             _internal_check_root_privileges
@@ -16925,7 +16966,7 @@ corix_strata_execute() {
             local _cwd="/"
             [ -d "${strata_path}${PWD}" ] && _cwd="$PWD"
 
-            chroot "$strata_path" /bin/bash -lc "cd \"$_cwd\" && $*"
+            chroot "$strata_path" /bin/bash -c "cd \"$_cwd\" && $strata_command"
             local rc=$?
 
             # Cleanup mounts (best-effort)
@@ -17009,7 +17050,7 @@ corix_strata_export_pkgs() {
         dnf|fedora)
             # rpm is faster and cleaner for just listing names.
             # 只列出名称时，rpm 更快、更干净。
-            list_cmd="rpm -qa --qf '%{NAME}\n'"
+            list_cmd="rpm -qa --qf '%{NAME}\n' | grep -vx gpg-pubkey"
             ;;
         portage|gentoo)
             # [修复] 改用 equery 工具进行精确查询，避免手动解析文件名带来的错误。
@@ -17024,7 +17065,7 @@ corix_strata_export_pkgs() {
                     echo 'Error: equery (from app-portage/gentoolkit) is required to export packages from a Portage strata.' >&2
                     exit 1
                 fi
-                equery -q -F '\$category/\$name' list '*'
+                equery -q list -F '\$category/\$name' '*'
             "
             ;;
         *)
@@ -18084,13 +18125,13 @@ corix_group() {
             [ $# -ne 1 ] && { usage_group; exit 1; }
             _update_chain_state_cache >/dev/null 2>&1
             local group_id="$1"
-            local group_info=$(db_query_safe "$FORUM_DB" "SELECT nickname, permissions FROM identity_cache WHERE id_hash = %s AND type = 'group';" "$group_id")
+            local group_info=$(db_query_safe "$FORUM_DB" "SELECT nickname, json(permissions) FROM identity_cache WHERE id_hash = %s AND type = 'group';" "$group_id")
             [ -z "$group_info" ] && { error "群组未找到。 / Group not found."; exit 1; }
             local nickname perms; IFS='|' read -r nickname perms <<< "$group_info"
             echo -e "群组信息 / Group Info for: \033[1;32m${nickname}\033[0m"; echo -e "ID: ${group_id}"
             local join_mode desc; join_mode=$(echo "$perms" | jq -r '.policy.join_mode // "invite-only"'); desc=$(echo "$perms" | jq -r '.policy.description // ""')
             echo "策略 / Policy: ${join_mode}"; echo "描述 / Description: ${desc}"; echo "---------------------------------"
-            db_query_safe "$FORUM_DB" "SELECT grantee_id, permissions FROM acl_state WHERE acl_id = %s;" "$group_id" | while IFS='|' read -r user_id user_perms; do
+            db_query_safe "$FORUM_DB" "SELECT grantee_id, json(permissions) FROM acl_state WHERE acl_id = %s;" "$group_id" | while IFS='|' read -r user_id user_perms; do
                 local perms_str=$(echo "$user_perms" | jq -r 'join(", ")'); echo "  - $(_get_identity_nickname "$user_id") (${user_id:0:16}...) -> [${perms_str}]"; done;;
         history)
             [ $# -ne 1 ] && { usage_group; exit 1; }; corix_group_history "$1";;
@@ -18476,7 +18517,7 @@ _internal_mail_read() {
         local mail_dir="${VAR_LIB_CORIUM_DIR}/mail/objects"
         mkdir -p "$mail_dir"
         local_path="${mail_dir}/${mail_object_hash}"
-        _p2p_download_object "$mail_object_hash" "$local_path" || { error "无法下载邮件内容。/ Failed to download mail content."; return 1; }
+        _download_file_p2p "$mail_object_hash" "$local_path" || { error "无法下载邮件内容。/ Failed to download mail content."; return 1; }
         db_execute_safe "$FORUM_DB" "UPDATE mails SET local_path = %s WHERE tx_hash = %s;" "$local_path" "$tx_hash"
     fi
     
@@ -18484,8 +18525,8 @@ _internal_mail_read() {
     local recipient_type=$(_get_identity_type "$recipient_id")
     
     # Decrypt if it's a private mail to us
-    if [ "$recipient_type" = "user" ]; then
-        content=$(_e2ee_decrypt_payload "$content")
+    if jq -e 'type=="object" and has("encrypted_payload")' <<< "$content" >/dev/null; then
+        content=$(_e2ee_decrypt_payload "$content") || return 1
         if [[ "$content" == \[解密失败* ]]; then
             error "无法解密邮件！您可能不是收件人，或者密钥已损坏。/ Failed to decrypt mail! You may not be the recipient or your key is corrupt."
             return 1
@@ -18526,8 +18567,8 @@ _internal_mail_get_subject() {
     local content; content=$(cat "$local_path")
     local recipient_type=$(_get_identity_type "$recipient_id")
     
-    if [ "$recipient_type" = "user" ]; then
-        content=$(_e2ee_decrypt_payload "$content")
+    if jq -e 'type=="object" and has("encrypted_payload")' <<< "$content" >/dev/null; then
+        content=$(_e2ee_decrypt_payload "$content") || return 1
     fi
     
     if [[ "$content" == \[解密失败* ]]; then
@@ -20187,6 +20228,7 @@ _update_chain_state_cache() {
                     acl_id=$(echo "$tx_payload" | jq -r .acl_id); grantee_id=$(echo "$tx_payload" | jq -r .grantee_id)
                     perms_to_add=$(echo "$tx_payload" | jq '.permissions')
                     current_perms=$(db_query_safe "$FORUM_DB" "SELECT permissions FROM acl_state WHERE acl_id = %s AND grantee_id = %s;" "$acl_id" "$grantee_id" | jq -r '. // []')
+                    current_perms=${current_perms:-[]}
                     new_perms=$(jq -n --argjson p1 "$current_perms" --argjson p2 "$perms_to_add" '($p1 + $p2) | unique')
                     db_execute_safe "$FORUM_DB" "INSERT OR REPLACE INTO acl_state (acl_id, grantee_id, permissions) VALUES (%s, %s, %s);" "$acl_id" "$grantee_id" "$new_perms"
                     ;;
@@ -20195,6 +20237,7 @@ _update_chain_state_cache() {
                     acl_id=$(echo "$tx_payload" | jq -r .acl_id); grantee_id=$(echo "$tx_payload" | jq -r .grantee_id)
                     perms_to_remove=$(echo "$tx_payload" | jq '.permissions')
                     current_perms=$(db_query_safe "$FORUM_DB" "SELECT permissions FROM acl_state WHERE acl_id = %s AND grantee_id = %s;" "$acl_id" "$grantee_id" | jq -r '. // []')
+                    current_perms=${current_perms:-[]}
                     new_perms=$(jq -n --argjson p1 "$current_perms" --argjson p2 "$perms_to_remove" '$p1 - $p2')
                     db_execute_safe "$FORUM_DB" "INSERT OR REPLACE INTO acl_state (acl_id, grantee_id, permissions) VALUES (%s, %s, %s);" "$acl_id" "$grantee_id" "$new_perms"
                     if _is_authorized_by_acl "$acl_id" "$sender_id" "owner" && [[ "$perms_to_remove" == *'"admin"'* ]]; then
@@ -20227,6 +20270,7 @@ _update_chain_state_cache() {
                     local group_id current_perms new_perms
                     group_id=$(echo "$tx_payload" | jq -r .group_id)
                     current_perms=$(db_query_safe "$FORUM_DB" "SELECT permissions FROM acl_state WHERE acl_id = %s AND grantee_id = %s;" "$group_id" "$sender_id" | jq -r '. // []')
+                    current_perms=${current_perms:-[]}
                     new_perms=$(jq -n --argjson p "$current_perms" '($p + ["member"]) | unique')
                     db_execute_safe "$FORUM_DB" "INSERT OR REPLACE INTO acl_state (acl_id, grantee_id, permissions) VALUES (%s, %s, %s);" "$group_id" "$sender_id" "$new_perms"
                     ;;
@@ -20251,7 +20295,7 @@ _update_chain_state_cache() {
                     page_tx_hash=$(echo "$tx_payload" | jq -r .page_create_tx_hash); prev_ver=$(echo "$tx_payload" | jq -r .previous_version_hash)
                     content_hash=$(echo "$tx_payload" | jq -r .content_hash); attachment_hash=$(echo "$tx_payload" | jq -r '.attachment_hash // ""')
                     msg=$(echo "$tx_payload" | jq -r .commit_message); format=$(echo "$tx_payload" | jq -r '.format // "md"')
-                    db_execute_safe "$FORUM_DB" "INSERT OR IGNORE INTO wiki_versions (version_tx_hash, page_tx_hash, previous_version_hash, author_id, content_hash, commit_message, format, timestamp) VALUES (%s, %s, %s, %s, %s, %s, %d);" "$tx_hash" "$page_tx_hash" "$prev_ver" "$sender_id" "$content_hash" "$msg" "$format" "$tx_timestamp"
+                    db_execute_safe "$FORUM_DB" "INSERT OR IGNORE INTO wiki_versions (version_tx_hash, page_tx_hash, previous_version_hash, author_id, content_hash, commit_message, format, timestamp) VALUES (%s, %s, %s, %s, %s, %s, %s, %d);" "$tx_hash" "$page_tx_hash" "$prev_ver" "$sender_id" "$content_hash" "$msg" "$format" "$tx_timestamp"
                     db_execute_safe "$FORUM_DB" "UPDATE wiki_pages SET latest_version_hash = %s, attachment_hash = %s, locked_by_user_id = NULL, lock_tx_hash = NULL WHERE page_tx_hash = %s;" "$tx_hash" "$attachment_hash" "$page_tx_hash"
                     ;;
                 "nns_register")
@@ -21829,7 +21873,7 @@ try:
         if not isinstance(tables,dict): raise ValueError('Malformed recovered tables')
         excluded={'blocks','transactions','chain_state','staged_blocks'} if db is dbs[0] else {'subscriptions','aliases','local_user_blocks','objects','topics','posts','cbb_messages','exodus_proposals','exodus_notarizations','agent_emergency_queue'}
         optional={'chain_state'} if db is dbs[0] else set()
-        if set(tables)-optional!=available-excluded: raise ValueError('Incomplete recovered tables')
+        if set(tables)-optional!=available-excluded: raise ValueError('Incomplete recovered tables: missing='+str(sorted((available-excluded)-(set(tables)-optional)))+', unexpected='+str(sorted((set(tables)-optional)-(available-excluded))))
         for table,rows in tables.items():
             if table not in available or table in ('blocks','transactions','staged_blocks'): raise ValueError('Unknown recovery table')
             if table=='chain_state' and (len(rows)!=1 or rows[0].get('key')!='core_gpg_authority'): raise ValueError('Invalid recovered protocol authority')
@@ -22369,7 +22413,7 @@ _internal_compute_run() {
         compute_mod_path=$(mktemp -d)/compute_mod
         
         _apply_theme "info" "正在下载计算程序 (哈希: ${compute_hash:0:12})... / Downloading compute program (hash: ${compute_hash:0:12})..."
-        if ! _p2p_download_object "$compute_hash" "$compute_mod_path"; then
+        if ! _download_file_p2p "$compute_hash" "$compute_mod_path"; then
             error "无法下载计算程序 Mod。 / Failed to download the compute program Mod."
             return 1
         fi
@@ -22407,6 +22451,7 @@ _internal_compute_submit() {
 
     local proof_json
     proof_json=$(cat "$proof_file")
+    jq -e 'type == "object" and (.engine_id | type == "string" and length > 0) and (.problem_id | type == "string" and length > 0) and (.proof_data | type == "object")' <<< "$proof_json" >/dev/null || return 1
 
     # 验证 proof 文件的基本格式
     # Validate the basic format of the proof file
@@ -24567,8 +24612,8 @@ corix_rebuild_from_world() {
     # --- [MODIFIED] Step 3: Calculate the diff for all categories ---
     # --- [已修改] 步骤 3: 计算所有类别的差异 ---
     info "Calculating system state change plan... / 正在计算系统状态变更计划..."
-    local -a to_install to_remove to_keep
-    local -a strata_to_create strata_to_destroy strata_to_keep
+    local -a to_install=() to_remove=() to_keep=()
+    local -a strata_to_create=() strata_to_destroy=() strata_to_keep=()
     
     # Use comm for efficient, sorted list comparison (logic unchanged for Corium packages)
     # 使用 comm 进行高效的有序列表比较 (Corium 软件包的逻辑无变动)
@@ -24707,7 +24752,7 @@ corix_rebuild_from_world() {
                 info "Installing into '$name' (type: $strata_type): $pkgs_to_install / 正在向 '$name' (类型: $strata_type) 中安装: $pkgs_to_install"
                 # The strata execute function handles locks appropriately
                 # strata 执行函数会妥善处理锁
-                corix strata -e "$name" "$install_cmd" "$pkgs_to_install"
+                corix_strata_execute "$name" "$install_cmd $pkgs_to_install"
             else
                 warn "Unsupported strata type '$strata_type' for package installation inside strata '$name'. Please install manually. / 不支持在 strata '$name' 内部为 '$strata_type' 类型的环境自动安装包，请手动安装。"
             fi
@@ -27257,7 +27302,7 @@ ${my_id}"
             local signature; signature=$(sign_data "$canonical_str" "$USER_IDENTITY_FILE") || return 1
             local snso_object=$(jq -n --arg ph "$proposal_hash" --arg nid "$my_id" --arg sig "$signature" \
                 '{proposal_hash: $ph, notary_id: $nid, signature: $sig}')
-            [ "$(db_query_safe "$FORUM_DB" "SELECT COUNT(*) FROM exodus_proposals WHERE proposal_hash=%s AND expires_at>CAST(strftime('%s','now') AS INTEGER);" "$proposal_hash")" -eq 1 ] || return 1
+            [ "$(db_query_safe "$FORUM_DB" "SELECT COUNT(*) FROM exodus_proposals WHERE proposal_hash=%s AND expires_at>CAST(strftime('%' || 's','now') AS INTEGER);" "$proposal_hash")" -eq 1 ] || return 1
             db_execute_safe "$FORUM_DB" "INSERT OR IGNORE INTO exodus_notarizations VALUES (%s,%s,%s,%s);" "$proposal_hash" "$my_id" "$signature" "$snso_object" || return 1
             _apply_theme "info" "正在广播您对提案 ${proposal_hash:0:16}... 的公证签名... / Broadcasting your notarization for proposal ${proposal_hash:0:16}..."
             local peers; peers=$(dht_find_closest_nodes "$my_id" 10) || peers=""
@@ -27288,7 +27333,7 @@ ${my_id}"
             
             local proposal_height=""
             local proposal_target_hash=""
-            IFS="|" read -r proposal_height proposal_target_hash < <(db_query_safe "$FORUM_DB" "SELECT target_block_height, target_block_hash FROM exodus_proposals WHERE proposal_hash = %s AND expires_at > CAST(strftime('%s','now') AS INTEGER);" "$proposal_hash")
+            IFS="|" read -r proposal_height proposal_target_hash < <(db_query_safe "$FORUM_DB" "SELECT target_block_height, target_block_hash FROM exodus_proposals WHERE proposal_hash = %s AND expires_at > CAST(strftime('%' || 's','now') AS INTEGER);" "$proposal_hash")
 
             if [ -z "$proposal_height" ] || [ -z "$proposal_target_hash" ]; then
                 error "无法从本地提案记录中获取目标区块高度。/ Could not retrieve target block height from local proposals."

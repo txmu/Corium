@@ -31,8 +31,13 @@ class Applications(Fixture):
         self.snapshot(height=height)
         self.run_core('_internal_rebuild_derived_state')
         self.assertEqual(self.semantic(), before)
+        with sqlite3.connect(self.chain) as db:
+            db.execute('DELETE FROM blocks'); db.execute('DELETE FROM transactions')
         self.run_core('_internal_import_phoenix_state "$CORIUM_ROOT/snapshot.json"')
-        self.assertEqual(self.semantic(), before)
+        recovered = self.semantic()
+        self.assertEqual(recovered['application'], before['application'])
+        self.assertEqual({k:v for k,v in recovered['chain'].items() if k not in ('blocks','transactions')},
+                         {k:v for k,v in before['chain'].items() if k not in ('blocks','transactions')})
 
     def test_wiki_create_lock_edit_unlock_objects_attachments_and_phoenix(self):
         gid = self.group()
@@ -50,6 +55,8 @@ class Applications(Fixture):
         edit = self.transaction('wiki_page_edit', {'page_create_tx_hash':page_tx,'previous_version_hash':version,'content_hash':content,'commit_message':'edit','format':'md'})
         self.mine()
         self.assertIn('第二版', self.run_core('corix_wiki show '+gid+'/page').stdout)
+        # Editing releases its lock; acquire another lock to exercise explicit unlock.
+        self.transaction('wiki_page_lock', {'page_create_tx_hash':page_tx}); self.mine()
         self.transaction('wiki_page_unlock', {'page_create_tx_hash':page_tx}); self.mine()
         with sqlite3.connect(self.forum) as db:
             self.assertEqual(db.execute('SELECT latest_version_hash,locked_by_user_id FROM wiki_pages').fetchone(), (edit,None))
@@ -59,6 +66,7 @@ class Applications(Fixture):
     def test_wiki_nonmember_edit_without_lock_stale_version_rejected(self):
         tx = self.put_transaction('wiki_page_create', {'group_id':'f'*64,'page_slug':'unauthorized','content_hash':'a'*64})
         self.validate_transaction(tx, ok=False)
+        with sqlite3.connect(self.chain) as db: db.execute('DELETE FROM transactions WHERE hash=?', (tx,))
         gid = self.group()
         page = self.root/'page.md'; page.write_text('page')
         self.run_core('corix_wiki create '+gid+'/page --file '+str(page)+' --message initial'); self.mine()
@@ -66,7 +74,9 @@ class Applications(Fixture):
             page_tx = db.execute('SELECT page_tx_hash FROM wiki_pages').fetchone()[0]
         edit = self.put_transaction('wiki_page_edit', {'page_create_tx_hash':page_tx,'previous_version_hash':'0'*64,'content_hash':'a'*64}, 3)
         self.validate_transaction(edit, ok=False)
+        with sqlite3.connect(self.chain) as db: db.execute('DELETE FROM transactions WHERE hash=?', (edit,))
         self.transaction('wiki_page_lock', {'page_create_tx_hash':page_tx}); self.mine()
+        edit = self.put_transaction('wiki_page_edit', {'page_create_tx_hash':page_tx,'previous_version_hash':'0'*64,'content_hash':'a'*64}, 3)
         self.validate_transaction(edit, ok=False)
 
     def test_nomen_register_resolve_transfer_ownership_and_phoenix(self):

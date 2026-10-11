@@ -30,5 +30,5 @@ connect corium-b lan-b 10.81.2.2 10.81.2.1
 connect corium-wan wan0 198.18.0.2 198.18.0.1
 sudo ip netns exec corium-router sysctl -w net.ipv4.ip_forward=1
 sudo ip netns exec corium-router iptables -t nat -A POSTROUTING -o wan0 -j MASQUERADE
-sudo ip netns exec corium-router tcpdump -i any -U -w "$PWD/ci-logs/nat.pcap" > ci-logs/tcpdump.log 2>&1 &
+sudo ip netns exec corium-router tcpdump -i any -U -s 256 -C 16 -W 2 -w "$PWD/ci-logs/nat.pcap" > ci-logs/tcpdump.log 2>&1 &
 sudo env PATH="$PATH" PYTHONPATH="$PWD" RUNNER_TEMP="$RUNNER_TEMP" python3 -m unittest -v ci.test_network 2>&1 | tee ci-logs/network.log

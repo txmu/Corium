@@ -31,17 +31,18 @@ class Strata(Fixture):
     def test_native_manager_install_query_export_promote_rebuild_remove_destroy(self):
         commands={
             'apt':('apt-get update && apt-get install -y hello','dpkg-query -W hello','apt-get remove -y hello'),
-            'pacman':('pacman -Syu --noconfirm hello','pacman -Q hello','pacman -R --noconfirm hello'),
+            'pacman':('pacman -Syu --noconfirm tree','pacman -Q tree','pacman -R --noconfirm tree'),
             'dnf':('dnf install -y hello','rpm -q hello','dnf remove -y hello'),
             'portage':('emerge --sync && emerge --ask=n app-portage/gentoolkit app-misc/hello','equery list app-misc/hello','emerge --unmerge app-misc/hello'),
         }
+        package = 'tree' if self.pm == 'pacman' else 'hello'
         install,query,remove=commands[self.pm]
         self.run_core('corix_strata_execute native '+shlex.quote(install))
-        self.assertIn('hello',self.run_core('corix_strata_execute native '+shlex.quote(query)).stdout)
+        self.assertIn(package,self.run_core('corix_strata_execute native '+shlex.quote(query)).stdout)
         exported=self.run_core('corix_strata_export_pkgs native').stdout
-        self.assertIn('hello',exported)
+        self.assertIn(package,exported)
         self.run_core('corix_strata_promote native')
-        world=(self.etc/'world').read_text(); self.assertIn('strata:native:'+self.pm,world); self.assertIn('hello',world)
+        world=(self.etc/'world').read_text(); self.assertIn('strata:native:'+self.pm,world); self.assertIn(package,world)
         self.run_core('corix_strata_promote native'); self.assertEqual((self.etc/'world').read_text(),world)
         self.run_core('corix_rebuild_from_world --force')
         self.run_core('corix_strata_execute native '+shlex.quote(remove))

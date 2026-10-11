@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Regression tests execute the monolith with real schemas, signatures and files."""
+from contextlib import closing
 import copy,hashlib,json,os,pathlib,random,shlex,sqlite3,subprocess,tarfile,tempfile,unittest,io,signal
 from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -28,7 +29,7 @@ class Fixture(unittest.TestCase):
     def sign(self,data):return self.key.sign(data.encode(),ec.ECDSA(hashes.SHA256())).hex()
     def run_core(self,script,ok=True):
         process=subprocess.Popen(['bash','-c','source '+shlex.quote(str(SOURCE))+'\n'+script],env=self.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
-        try: stdout,stderr=process.communicate(timeout=90)
+        try: stdout,stderr=process.communicate(timeout=getattr(self, "core_timeout", 90))
         except subprocess.TimeoutExpired:
             os.killpg(process.pid,signal.SIGKILL);stdout,stderr=process.communicate()
             self.fail('Core command timed out:\n'+script+'\n'+stdout+stderr)
@@ -45,7 +46,7 @@ class Fixture(unittest.TestCase):
         file=self.root/'candidate.json';file.write_text(json.dumps(data,ensure_ascii=False))
         return self.run_core('_internal_import_phoenix_state '+shlex.quote(str(file)),ok)
     def add_empty_block(self,height,previous=None,timestamp=None,signature=None):
-        with sqlite3.connect(self.chain) as db:
+        with closing(sqlite3.connect(self.chain)) as db, db:
             if previous is None:previous=db.execute('SELECT hash FROM blocks WHERE height=?',(height-1,)).fetchone()[0]
             timestamp=height if timestamp is None else timestamp
             content=json.dumps({'height':height,'previous_hash':previous,'timestamp':timestamp,'transactions':[]},separators=(',',':'))

@@ -198,4 +198,31 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.rpc('STORE',digest+' '+self.identity,wrong)['status'],'error')
         with sqlite3.connect(self.dht) as db:self.assertEqual(json.loads(db.execute('SELECT nodes FROM chunks WHERE hash=?',(digest,)).fetchone()[0]),[self.identity])
 
+class StunDiscoveryTests(unittest.TestCase):
+    def test_binding_xor_address_and_transaction_binding_over_udp(self):
+        import socket, struct
+        from unittest.mock import patch
+        function=next(node for node in ast.parse(DAEMON).body if isinstance(node,ast.FunctionDef) and node.name=='discover_public_address')
+        namespace={'socket':socket,'os':os,'time':time,'bilingual_print':lambda *args:None}
+        exec(compile(ast.Module(body=[function],type_ignores=[]),'gateway:stun','exec'),namespace)
+        with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as server:
+            server.bind(('127.0.0.1',0)); server.settimeout(5)
+            def respond():
+                request,peer=server.recvfrom(1024)
+                cookie=0x2112A442
+                address=bytes(a^b for a,b in zip(socket.inet_aton('198.18.0.1'),struct.pack('!I',cookie)))
+                body=struct.pack('!HHBBH',0x20,8,0,1,54321^(cookie>>16))+address
+                header=struct.pack('!HHI',0x101,len(body),cookie)
+                # A response from the correct server with another transaction must be ignored.
+                forged_address=bytes(a^b for a,b in zip(socket.inet_aton('203.0.113.9'),struct.pack('!I',cookie)))
+                forged_body=struct.pack('!HHBBH',0x20,8,0,1,12345^(cookie>>16))+forged_address
+                server.sendto(header+b'x'*12+forged_body,peer)
+                server.sendto(header+request[8:20]+body,peer)
+            thread=threading.Thread(target=respond,daemon=True); thread.start()
+            with patch.dict(os.environ,CORIUM_STUN_SERVERS='127.0.0.1:'+str(server.getsockname()[1])):
+                namespace['discover_public_address']()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual((namespace['PUBLIC_IP'],namespace['PUBLIC_PORT']),('198.18.0.1',54321))
+
 if __name__=='__main__': unittest.main(verbosity=2)
