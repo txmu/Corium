@@ -87,8 +87,12 @@ class Network(unittest.TestCase):
         self.assertIn('type=PING',self.logs['a'].read_text(),'No reverse network connection reached the requester')
 
     def test_real_upnp_igd_discovery_and_all_three_production_port_mappings(self):
+        # This WAN alias exists only inside the isolated router namespace.
+        # miniupnpd rejects RFC 2544 benchmark addresses as advertised external IPs.
+        self.router('ip addr add 11.81.3.1/32 dev wan0')
+        self.addCleanup(self.router,'ip addr del 11.81.3.1/32 dev wan0')
         config=pathlib.Path(os.environ['RUNNER_TEMP'])/'miniupnpd.conf'
-        config.write_text('ext_ifname=wan0\next_ip=198.18.0.1\nlistening_ip=10.81.1.1\nenable_upnp=yes\nenable_natpmp=yes\nsecure_mode=yes\nsystem_uptime=yes\nuuid=12345678-1234-1234-1234-123456789abc\nallow 1024-65535 10.81.1.0/24 1024-65535\n')
+        config.write_text('ext_ifname=wan0\next_ip=11.81.3.1\nlistening_ip=10.81.1.1\nenable_upnp=yes\nenable_natpmp=yes\nsecure_mode=yes\nsystem_uptime=yes\nuuid=12345678-1234-1234-1234-123456789abc\nallow 1024-65535 10.81.1.0/24 1024-65535\n')
         # miniupnpd needs its chains in this router namespace, independently of the host service.
         self.router('set -e\niptables -N MINIUPNPD\niptables -A FORWARD -j MINIUPNPD\n'
                     'iptables -t nat -N MINIUPNPD\niptables -t nat -A PREROUTING -j MINIUPNPD\n'
