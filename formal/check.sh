@@ -2,7 +2,9 @@
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-lean --version | tee /dev/stderr | rg -q 'version 4\.19\.0,'
+lean_version=$(lean --version)
+printf '%s\n' "$lean_version"
+[[ "$lean_version" =~ version\ 4\.19\.0, ]]
 python3 formal/check_source.py
 audit_dir=$(mktemp -d)
 trap 'rm -rf "$audit_dir"' EXIT
