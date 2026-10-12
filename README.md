@@ -13,10 +13,11 @@ Corium v108 单文件 Bash 实现，入口为 `corix_v108.sh`。
 Wiki、Strata、快照、原生挖块、内容及 Phoenix 恢复使用持久化意图与幂等日志。
 `transport_bindings_file` 可将原生 `dht_send_message` 接入 Shadow6 原始 SDK；
 对端身份和部署锁须固定，直连回退仅按显式策略执行。配置不存在或为 FALSE
+时仍走既有原生路径。内嵌非代币 ZKT 信誉与贡献积分机制（`corix zkt status` / `account` / `record`），支持自由配置奖励规则与急需 Core/应用服务权重。
 
 全部实现内嵌在生产文件，独立交付不依赖 Ziokt 仓库。普通原生命令与
 sourced API 保留既有行为。对象目录包含软件包、Strata、应用、身份、名称、提案和快照元数据，
-不将存储记录声明为运行健康。运行 `python3 -m unittest -v test_ziokt`
+不将存储记录声明为运行健康。运行 `python3 -m unittest -v test_ziokt test_zkt`
 验证独立交付、关闭模式、网络作用域、协议拒绝和无恢复副作用。
 
 ## 自动化验证

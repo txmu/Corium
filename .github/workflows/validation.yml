@@ -48,6 +48,9 @@ jobs:
       - name: Native Ziokt opt-in contract
         if: ${{ !cancelled() }}
         run: python -m unittest -v test_ziokt
+      - name: Native ZKT reputation system
+        if: ${{ !cancelled() }}
+        run: python -m unittest -v test_zkt
       - name: All original suites (BLOCKED fails)
         if: ${{ !cancelled() }}
         run: bash test_all.sh
