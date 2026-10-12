@@ -56,7 +56,7 @@ class ZioktTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         response = json.loads(result.stdout)
         self.assertTrue(response["ok"])
-        self.assertEqual(response["result"]["recovery"], "not-run-by-readonly-provider")
+        self.assertEqual(response["result"]["recovery"], "explicit-native-operation")
         self.assertEqual(sorted(str(p) for p in self.root.rglob("*")), before)
 
     def test_network_context_selected_before_machine_request(self):
