@@ -379,7 +379,7 @@ def secure_read(path, limit=MAX_CONFIG, private=True):
     """Stable regular-file reads, never symlinks, FIFOs or unsafe modes."""
     path = Path(path)
     before = path.lstat()
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     try:
         opened = os.fstat(fd)
 
@@ -2769,7 +2769,7 @@ def secure_read(path, limit=MAX_CONFIG, private=True):
     """Stable regular-file reads, never symlinks, FIFOs or unsafe modes."""
     path = Path(path)
     before = path.lstat()
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     try:
         opened = os.fstat(fd)
 
@@ -5167,7 +5167,7 @@ def secure_read(path, limit=MAX_CONFIG, private=True):
     """Stable regular-file reads, never symlinks, FIFOs or unsafe modes."""
     path = Path(path)
     before = path.lstat()
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     try:
         opened = os.fstat(fd)
 
@@ -7191,7 +7191,7 @@ def secure_read(path, limit=MAX_CONFIG, private=True):
     """Stable regular-file reads, never symlinks, FIFOs or unsafe modes."""
     path = Path(path)
     before = path.lstat()
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     try:
         opened = os.fstat(fd)
 
