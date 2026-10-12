@@ -34,6 +34,7 @@ class ZKTChainTests(Fixture):
         self.policy["signature"] = self.key.sign(b"Ziokt/ZKT/genesis/v1\n" + canonical(self.policy), ec.ECDSA(hashes.SHA256())).hex()
         genesis = json.loads((self.etc / "genesis.json").read_text())
         genesis["ziokt_zkt"] = self.policy
+        genesis["ziokt_zkt_enabled"] = True
         (self.etc / "genesis.json").write_text(json.dumps(genesis))
         self.run_core('db_execute_safe "$BLOCKCHAIN_DB" "DELETE FROM blocks; DELETE FROM validators; DELETE FROM chain_state;"; blockchain_create_genesis_block; _update_chain_state_cache')
 

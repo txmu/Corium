@@ -16,7 +16,7 @@ class Fixture(unittest.TestCase):
         self.chain=self.base/'blockchain/chain.db';self.forum=self.base/'forum/forum.db';self.dht=self.root/'var/lib/corix/p2p/dht.db'
         for path,name in [(self.chain,'_init_blockchain_db'),(self.forum,'_init_app_db'),(self.dht,'_init_dht_db')]:
             path.parent.mkdir(parents=True,exist_ok=True)
-            with sqlite3.connect(path) as db:db.executescript(schema(name))
+            with closing(sqlite3.connect(path)) as db, db:db.executescript(schema(name))
         self.key=ec.generate_private_key(ec.SECP256K1())
         self.pem=self.key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode().rstrip('\n')
         self.identity=hashlib.sha256(self.pem.encode()).hexdigest()

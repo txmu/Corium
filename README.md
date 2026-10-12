@@ -8,10 +8,15 @@ Corium v108 单文件 Bash 实现，入口为 `corix_v108.sh`。
 `corix.conf` 新增 `[ziokt]` 段，使用 `enabled = TRUE`、`federation_id`、
 `provider_id` 和 `allow_mutations = FALSE`；配置文件必须为当前用户所有、
 非符号链接、模式 `0600`。`corix ziokt --network NAME rpc --stdio` 使用固定、
-有界、只读操作表。此入口在原生建锁目录、恢复和交互之前分流，不写盘。
+有界操作表。只读入口在原生建锁目录、恢复和交互之前分流，不写盘。
+写操作还须启用 `allow_mutations=TRUE` 并配置动作、资源允许列表；固定
+Wiki、Strata、快照、原生挖块、内容及 Phoenix 恢复使用持久化意图与幂等日志。
+`transport_bindings_file` 可将原生 `dht_send_message` 接入 Shadow6 原始 SDK；
+对端身份和部署锁须固定，直连回退仅按显式策略执行。配置不存在或为 FALSE
+时仍走既有原生路径。ZKT 新功能目前冻结，正式发行保持关闭。
 
 全部实现内嵌在生产文件，独立交付不依赖 Ziokt 仓库。普通原生命令与
-sourced API 保留既有行为。当前仅提供能力、状态和软件包/Strata 元数据，
+sourced API 保留既有行为。对象目录包含软件包、Strata、应用、身份、名称、提案和快照元数据，
 不将存储记录声明为运行健康。运行 `python3 -m unittest -v test_ziokt`
 验证独立交付、关闭模式、网络作用域、协议拒绝和无恢复副作用。
 
