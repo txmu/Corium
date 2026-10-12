@@ -643,14 +643,16 @@ def native_objects(provider, root, network, config):
         # Message bodies, ACL members, keys and peer addresses stay native.
         queries = (("forum/forum.db", "identity", "SELECT id_hash,type,last_updated_height FROM identity_cache", ("native_type", "height")),
                    ("forum/forum.db", "application", "SELECT group_id || '/' || slug,latest_version_hash,locked_by_user_id IS NOT NULL FROM wiki_pages", ("version_hash", "locked")),
+                   ("forum/forum.db", "application", "SELECT 'forum/' || tx_hash,source_type,encryption_mode FROM messages", ("native_type", "encryption_mode")),
+                   ("forum/forum.db", "application", "SELECT 'mail/' || tx_hash,mail_object_hash,timestamp FROM mails", ("content_digest", "timestamp")),
+                   ("blockchain/chain.db", "application", "SELECT 'template/' || template_name,package_hash,activation_height FROM active_app_templates", ("package_hash", "height")),
                    ("forum/forum.db", "name", "SELECT domain_name,target_hash,last_update_height FROM nns_records", ("target_hash", "height")),
                    ("blockchain/chain.db", "proposal", "SELECT hash,type,block_height FROM transactions WHERE type LIKE '%proposal%'", ("native_type", "height")))
         from contextlib import closing
         for filename, kind, query, columns in queries:
             path = root/"var/lib/corix"/suffix/filename
             if not path.exists(): continue
-            secure_read(path, 64*1024*1024, private=None)
-            with closing(sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)) as db:
+            with closing(native_database(path)) as db:
                 rows = db.execute(query+" LIMIT ?", (MAX_OBJECTS+1,)).fetchall()
             if len(rows) > MAX_OBJECTS: fail("INVENTORY_LIMIT", "native object projection exceeds budget")
             for row in rows:
@@ -810,7 +812,7 @@ def main(provider, root=None, argv=None, rpc_stream=None):
 """Local native operation journal. Exact actions, durable intents, no shell.
 
 This is not distributed ACID. A crash after native mutation leaves unknown;
-status reconciles supported postconditions before any retry.
+explicit reconcile checks supported postconditions before any retry.
 """
 import base64
 import sqlite3
@@ -936,10 +938,23 @@ def native_registry(root):
     return ServiceRegistry(catalog=CoreCatalog(root))
 
 
-def corium_db(root, network, name):
-    path = root / "var/lib/corix/networks" / network / name
-    secure_read(path, 64*1024*1024, private=None)
+def native_database(path):
+    """Validate an owned native database without reading its whole history."""
+    path = Path(path).absolute()
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or (os.name != "nt" and before.st_uid != os.geteuid()):
+        fail("UNSAFE_FILE", "owned regular native database required")
+    fd = os.open(path, os.O_RDONLY|getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino) or os.read(fd, 16) != b"SQLite format 3\x00":
+            fail("NATIVE_STATE_UNAVAILABLE", "native database header or identity changed")
+    finally: os.close(fd)
     return sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)
+
+
+def corium_db(root, network, name):
+    return native_database(root / "var/lib/corix/networks" / network / name)
 
 
 def corium_identity(root, network):
@@ -1024,7 +1039,8 @@ def operation_preflight(provider, root, network, params, config):
             group, slug = resource.split("/", 1)
             with closing(corium_db(root, network, "forum/forum.db")) as db:
                 permissions = db.execute("SELECT permissions FROM acl_state WHERE acl_id=? AND grantee_id=?", (group, author)).fetchone()
-                if not permissions or "member" not in strict_json(permissions[0].encode()):
+                grants = strict_json(permissions[0].encode()) if permissions else None
+                if not isinstance(grants, list) or not all(isinstance(v, str) for v in grants) or "member" not in grants:
                     fail("POLICY_DENIED", "native Wiki membership required")
                 if db.execute("SELECT 1 FROM wiki_pages WHERE group_id=? AND slug=?", (group, slug)).fetchone():
                     fail("NATIVE_STATE_CONFLICT", "native Wiki page already exists")
@@ -1229,8 +1245,8 @@ def operation_dispatch(provider, root, network, config, method, params):
                 return {"events": [], "next_seq": params.get("after_seq", 0)}
             raise
         try:
-            rows = db.execute("SELECT seq,operation_id,state,evidence FROM outbox WHERE seq>? ORDER BY seq LIMIT ?",
-                              (params.get("after_seq", 0), params.get("limit", 50))).fetchall()
+            rows = db.execute("SELECT o.seq,o.operation_id,o.state,o.evidence FROM outbox o JOIN operations p ON p.id=o.operation_id WHERE o.seq>? AND json_extract(p.plan,'$.federation_id')=? AND json_extract(p.plan,'$.provider_id')=? ORDER BY o.seq LIMIT ?",
+                              (params.get("after_seq", 0), config["federation_id"], config["provider_id"], params.get("limit", 50))).fetchall()
             return {"events": [{"seq": r[0], "operation_id": r[1], "state": r[2], "evidence": strict_json(r[3].encode())} for r in rows],
                     "next_seq": rows[-1][0] if rows else params.get("after_seq", 0)}
         finally:
@@ -1251,6 +1267,9 @@ def operation_dispatch(provider, root, network, config, method, params):
             request_digest = digest(params)
             row = db.execute("SELECT * FROM operations WHERE id=?", (params["operation_id"],)).fetchone()
             if row:
+                previous = strict_json(row[2].encode())
+                if previous["federation_id"] != config["federation_id"] or previous["provider_id"] != config["provider_id"]:
+                    fail("SCOPE_MISMATCH", "native operation belongs to another provider scope")
                 if row[1] != request_digest:
                     fail("IDEMPOTENCY_CONFLICT", "operation ID cannot change its request")
                 return operation_view(row)
@@ -2868,14 +2887,16 @@ def native_objects(provider, root, network, config):
         # Message bodies, ACL members, keys and peer addresses stay native.
         queries = (("forum/forum.db", "identity", "SELECT id_hash,type,last_updated_height FROM identity_cache", ("native_type", "height")),
                    ("forum/forum.db", "application", "SELECT group_id || '/' || slug,latest_version_hash,locked_by_user_id IS NOT NULL FROM wiki_pages", ("version_hash", "locked")),
+                   ("forum/forum.db", "application", "SELECT 'forum/' || tx_hash,source_type,encryption_mode FROM messages", ("native_type", "encryption_mode")),
+                   ("forum/forum.db", "application", "SELECT 'mail/' || tx_hash,mail_object_hash,timestamp FROM mails", ("content_digest", "timestamp")),
+                   ("blockchain/chain.db", "application", "SELECT 'template/' || template_name,package_hash,activation_height FROM active_app_templates", ("package_hash", "height")),
                    ("forum/forum.db", "name", "SELECT domain_name,target_hash,last_update_height FROM nns_records", ("target_hash", "height")),
                    ("blockchain/chain.db", "proposal", "SELECT hash,type,block_height FROM transactions WHERE type LIKE '%proposal%'", ("native_type", "height")))
         from contextlib import closing
         for filename, kind, query, columns in queries:
             path = root/"var/lib/corix"/suffix/filename
             if not path.exists(): continue
-            secure_read(path, 64*1024*1024, private=None)
-            with closing(sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)) as db:
+            with closing(native_database(path)) as db:
                 rows = db.execute(query+" LIMIT ?", (MAX_OBJECTS+1,)).fetchall()
             if len(rows) > MAX_OBJECTS: fail("INVENTORY_LIMIT", "native object projection exceeds budget")
             for row in rows:
@@ -3035,7 +3056,7 @@ def main(provider, root=None, argv=None, rpc_stream=None):
 """Local native operation journal. Exact actions, durable intents, no shell.
 
 This is not distributed ACID. A crash after native mutation leaves unknown;
-status reconciles supported postconditions before any retry.
+explicit reconcile checks supported postconditions before any retry.
 """
 import base64
 import sqlite3
@@ -3161,10 +3182,23 @@ def native_registry(root):
     return ServiceRegistry(catalog=CoreCatalog(root))
 
 
-def corium_db(root, network, name):
-    path = root / "var/lib/corix/networks" / network / name
-    secure_read(path, 64*1024*1024, private=None)
+def native_database(path):
+    """Validate an owned native database without reading its whole history."""
+    path = Path(path).absolute()
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or (os.name != "nt" and before.st_uid != os.geteuid()):
+        fail("UNSAFE_FILE", "owned regular native database required")
+    fd = os.open(path, os.O_RDONLY|getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino) or os.read(fd, 16) != b"SQLite format 3\x00":
+            fail("NATIVE_STATE_UNAVAILABLE", "native database header or identity changed")
+    finally: os.close(fd)
     return sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)
+
+
+def corium_db(root, network, name):
+    return native_database(root / "var/lib/corix/networks" / network / name)
 
 
 def corium_identity(root, network):
@@ -3249,7 +3283,8 @@ def operation_preflight(provider, root, network, params, config):
             group, slug = resource.split("/", 1)
             with closing(corium_db(root, network, "forum/forum.db")) as db:
                 permissions = db.execute("SELECT permissions FROM acl_state WHERE acl_id=? AND grantee_id=?", (group, author)).fetchone()
-                if not permissions or "member" not in strict_json(permissions[0].encode()):
+                grants = strict_json(permissions[0].encode()) if permissions else None
+                if not isinstance(grants, list) or not all(isinstance(v, str) for v in grants) or "member" not in grants:
                     fail("POLICY_DENIED", "native Wiki membership required")
                 if db.execute("SELECT 1 FROM wiki_pages WHERE group_id=? AND slug=?", (group, slug)).fetchone():
                     fail("NATIVE_STATE_CONFLICT", "native Wiki page already exists")
@@ -3454,8 +3489,8 @@ def operation_dispatch(provider, root, network, config, method, params):
                 return {"events": [], "next_seq": params.get("after_seq", 0)}
             raise
         try:
-            rows = db.execute("SELECT seq,operation_id,state,evidence FROM outbox WHERE seq>? ORDER BY seq LIMIT ?",
-                              (params.get("after_seq", 0), params.get("limit", 50))).fetchall()
+            rows = db.execute("SELECT o.seq,o.operation_id,o.state,o.evidence FROM outbox o JOIN operations p ON p.id=o.operation_id WHERE o.seq>? AND json_extract(p.plan,'$.federation_id')=? AND json_extract(p.plan,'$.provider_id')=? ORDER BY o.seq LIMIT ?",
+                              (params.get("after_seq", 0), config["federation_id"], config["provider_id"], params.get("limit", 50))).fetchall()
             return {"events": [{"seq": r[0], "operation_id": r[1], "state": r[2], "evidence": strict_json(r[3].encode())} for r in rows],
                     "next_seq": rows[-1][0] if rows else params.get("after_seq", 0)}
         finally:
@@ -3476,6 +3511,9 @@ def operation_dispatch(provider, root, network, config, method, params):
             request_digest = digest(params)
             row = db.execute("SELECT * FROM operations WHERE id=?", (params["operation_id"],)).fetchone()
             if row:
+                previous = strict_json(row[2].encode())
+                if previous["federation_id"] != config["federation_id"] or previous["provider_id"] != config["provider_id"]:
+                    fail("SCOPE_MISMATCH", "native operation belongs to another provider scope")
                 if row[1] != request_digest:
                     fail("IDEMPOTENCY_CONFLICT", "operation ID cannot change its request")
                 return operation_view(row)
@@ -4815,14 +4853,16 @@ def native_objects(provider, root, network, config):
         # Message bodies, ACL members, keys and peer addresses stay native.
         queries = (("forum/forum.db", "identity", "SELECT id_hash,type,last_updated_height FROM identity_cache", ("native_type", "height")),
                    ("forum/forum.db", "application", "SELECT group_id || '/' || slug,latest_version_hash,locked_by_user_id IS NOT NULL FROM wiki_pages", ("version_hash", "locked")),
+                   ("forum/forum.db", "application", "SELECT 'forum/' || tx_hash,source_type,encryption_mode FROM messages", ("native_type", "encryption_mode")),
+                   ("forum/forum.db", "application", "SELECT 'mail/' || tx_hash,mail_object_hash,timestamp FROM mails", ("content_digest", "timestamp")),
+                   ("blockchain/chain.db", "application", "SELECT 'template/' || template_name,package_hash,activation_height FROM active_app_templates", ("package_hash", "height")),
                    ("forum/forum.db", "name", "SELECT domain_name,target_hash,last_update_height FROM nns_records", ("target_hash", "height")),
                    ("blockchain/chain.db", "proposal", "SELECT hash,type,block_height FROM transactions WHERE type LIKE '%proposal%'", ("native_type", "height")))
         from contextlib import closing
         for filename, kind, query, columns in queries:
             path = root/"var/lib/corix"/suffix/filename
             if not path.exists(): continue
-            secure_read(path, 64*1024*1024, private=None)
-            with closing(sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)) as db:
+            with closing(native_database(path)) as db:
                 rows = db.execute(query+" LIMIT ?", (MAX_OBJECTS+1,)).fetchall()
             if len(rows) > MAX_OBJECTS: fail("INVENTORY_LIMIT", "native object projection exceeds budget")
             for row in rows:
@@ -4982,7 +5022,7 @@ def main(provider, root=None, argv=None, rpc_stream=None):
 """Local native operation journal. Exact actions, durable intents, no shell.
 
 This is not distributed ACID. A crash after native mutation leaves unknown;
-status reconciles supported postconditions before any retry.
+explicit reconcile checks supported postconditions before any retry.
 """
 import base64
 import sqlite3
@@ -5108,10 +5148,23 @@ def native_registry(root):
     return ServiceRegistry(catalog=CoreCatalog(root))
 
 
-def corium_db(root, network, name):
-    path = root / "var/lib/corix/networks" / network / name
-    secure_read(path, 64*1024*1024, private=None)
+def native_database(path):
+    """Validate an owned native database without reading its whole history."""
+    path = Path(path).absolute()
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or (os.name != "nt" and before.st_uid != os.geteuid()):
+        fail("UNSAFE_FILE", "owned regular native database required")
+    fd = os.open(path, os.O_RDONLY|getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino) or os.read(fd, 16) != b"SQLite format 3\x00":
+            fail("NATIVE_STATE_UNAVAILABLE", "native database header or identity changed")
+    finally: os.close(fd)
     return sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)
+
+
+def corium_db(root, network, name):
+    return native_database(root / "var/lib/corix/networks" / network / name)
 
 
 def corium_identity(root, network):
@@ -5196,7 +5249,8 @@ def operation_preflight(provider, root, network, params, config):
             group, slug = resource.split("/", 1)
             with closing(corium_db(root, network, "forum/forum.db")) as db:
                 permissions = db.execute("SELECT permissions FROM acl_state WHERE acl_id=? AND grantee_id=?", (group, author)).fetchone()
-                if not permissions or "member" not in strict_json(permissions[0].encode()):
+                grants = strict_json(permissions[0].encode()) if permissions else None
+                if not isinstance(grants, list) or not all(isinstance(v, str) for v in grants) or "member" not in grants:
                     fail("POLICY_DENIED", "native Wiki membership required")
                 if db.execute("SELECT 1 FROM wiki_pages WHERE group_id=? AND slug=?", (group, slug)).fetchone():
                     fail("NATIVE_STATE_CONFLICT", "native Wiki page already exists")
@@ -5401,8 +5455,8 @@ def operation_dispatch(provider, root, network, config, method, params):
                 return {"events": [], "next_seq": params.get("after_seq", 0)}
             raise
         try:
-            rows = db.execute("SELECT seq,operation_id,state,evidence FROM outbox WHERE seq>? ORDER BY seq LIMIT ?",
-                              (params.get("after_seq", 0), params.get("limit", 50))).fetchall()
+            rows = db.execute("SELECT o.seq,o.operation_id,o.state,o.evidence FROM outbox o JOIN operations p ON p.id=o.operation_id WHERE o.seq>? AND json_extract(p.plan,'$.federation_id')=? AND json_extract(p.plan,'$.provider_id')=? ORDER BY o.seq LIMIT ?",
+                              (params.get("after_seq", 0), config["federation_id"], config["provider_id"], params.get("limit", 50))).fetchall()
             return {"events": [{"seq": r[0], "operation_id": r[1], "state": r[2], "evidence": strict_json(r[3].encode())} for r in rows],
                     "next_seq": rows[-1][0] if rows else params.get("after_seq", 0)}
         finally:
@@ -5423,6 +5477,9 @@ def operation_dispatch(provider, root, network, config, method, params):
             request_digest = digest(params)
             row = db.execute("SELECT * FROM operations WHERE id=?", (params["operation_id"],)).fetchone()
             if row:
+                previous = strict_json(row[2].encode())
+                if previous["federation_id"] != config["federation_id"] or previous["provider_id"] != config["provider_id"]:
+                    fail("SCOPE_MISMATCH", "native operation belongs to another provider scope")
                 if row[1] != request_digest:
                     fail("IDEMPOTENCY_CONFLICT", "operation ID cannot change its request")
                 return operation_view(row)
@@ -6724,14 +6781,16 @@ def native_objects(provider, root, network, config):
         # Message bodies, ACL members, keys and peer addresses stay native.
         queries = (("forum/forum.db", "identity", "SELECT id_hash,type,last_updated_height FROM identity_cache", ("native_type", "height")),
                    ("forum/forum.db", "application", "SELECT group_id || '/' || slug,latest_version_hash,locked_by_user_id IS NOT NULL FROM wiki_pages", ("version_hash", "locked")),
+                   ("forum/forum.db", "application", "SELECT 'forum/' || tx_hash,source_type,encryption_mode FROM messages", ("native_type", "encryption_mode")),
+                   ("forum/forum.db", "application", "SELECT 'mail/' || tx_hash,mail_object_hash,timestamp FROM mails", ("content_digest", "timestamp")),
+                   ("blockchain/chain.db", "application", "SELECT 'template/' || template_name,package_hash,activation_height FROM active_app_templates", ("package_hash", "height")),
                    ("forum/forum.db", "name", "SELECT domain_name,target_hash,last_update_height FROM nns_records", ("target_hash", "height")),
                    ("blockchain/chain.db", "proposal", "SELECT hash,type,block_height FROM transactions WHERE type LIKE '%proposal%'", ("native_type", "height")))
         from contextlib import closing
         for filename, kind, query, columns in queries:
             path = root/"var/lib/corix"/suffix/filename
             if not path.exists(): continue
-            secure_read(path, 64*1024*1024, private=None)
-            with closing(sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)) as db:
+            with closing(native_database(path)) as db:
                 rows = db.execute(query+" LIMIT ?", (MAX_OBJECTS+1,)).fetchall()
             if len(rows) > MAX_OBJECTS: fail("INVENTORY_LIMIT", "native object projection exceeds budget")
             for row in rows:
@@ -6891,7 +6950,7 @@ def main(provider, root=None, argv=None, rpc_stream=None):
 """Local native operation journal. Exact actions, durable intents, no shell.
 
 This is not distributed ACID. A crash after native mutation leaves unknown;
-status reconciles supported postconditions before any retry.
+explicit reconcile checks supported postconditions before any retry.
 """
 import base64
 import sqlite3
@@ -7017,10 +7076,23 @@ def native_registry(root):
     return ServiceRegistry(catalog=CoreCatalog(root))
 
 
-def corium_db(root, network, name):
-    path = root / "var/lib/corix/networks" / network / name
-    secure_read(path, 64*1024*1024, private=None)
+def native_database(path):
+    """Validate an owned native database without reading its whole history."""
+    path = Path(path).absolute()
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or (os.name != "nt" and before.st_uid != os.geteuid()):
+        fail("UNSAFE_FILE", "owned regular native database required")
+    fd = os.open(path, os.O_RDONLY|getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino) or os.read(fd, 16) != b"SQLite format 3\x00":
+            fail("NATIVE_STATE_UNAVAILABLE", "native database header or identity changed")
+    finally: os.close(fd)
     return sqlite3.connect(path.as_uri()+"?mode=ro", uri=True)
+
+
+def corium_db(root, network, name):
+    return native_database(root / "var/lib/corix/networks" / network / name)
 
 
 def corium_identity(root, network):
@@ -7105,7 +7177,8 @@ def operation_preflight(provider, root, network, params, config):
             group, slug = resource.split("/", 1)
             with closing(corium_db(root, network, "forum/forum.db")) as db:
                 permissions = db.execute("SELECT permissions FROM acl_state WHERE acl_id=? AND grantee_id=?", (group, author)).fetchone()
-                if not permissions or "member" not in strict_json(permissions[0].encode()):
+                grants = strict_json(permissions[0].encode()) if permissions else None
+                if not isinstance(grants, list) or not all(isinstance(v, str) for v in grants) or "member" not in grants:
                     fail("POLICY_DENIED", "native Wiki membership required")
                 if db.execute("SELECT 1 FROM wiki_pages WHERE group_id=? AND slug=?", (group, slug)).fetchone():
                     fail("NATIVE_STATE_CONFLICT", "native Wiki page already exists")
@@ -7310,8 +7383,8 @@ def operation_dispatch(provider, root, network, config, method, params):
                 return {"events": [], "next_seq": params.get("after_seq", 0)}
             raise
         try:
-            rows = db.execute("SELECT seq,operation_id,state,evidence FROM outbox WHERE seq>? ORDER BY seq LIMIT ?",
-                              (params.get("after_seq", 0), params.get("limit", 50))).fetchall()
+            rows = db.execute("SELECT o.seq,o.operation_id,o.state,o.evidence FROM outbox o JOIN operations p ON p.id=o.operation_id WHERE o.seq>? AND json_extract(p.plan,'$.federation_id')=? AND json_extract(p.plan,'$.provider_id')=? ORDER BY o.seq LIMIT ?",
+                              (params.get("after_seq", 0), config["federation_id"], config["provider_id"], params.get("limit", 50))).fetchall()
             return {"events": [{"seq": r[0], "operation_id": r[1], "state": r[2], "evidence": strict_json(r[3].encode())} for r in rows],
                     "next_seq": rows[-1][0] if rows else params.get("after_seq", 0)}
         finally:
@@ -7332,6 +7405,9 @@ def operation_dispatch(provider, root, network, config, method, params):
             request_digest = digest(params)
             row = db.execute("SELECT * FROM operations WHERE id=?", (params["operation_id"],)).fetchone()
             if row:
+                previous = strict_json(row[2].encode())
+                if previous["federation_id"] != config["federation_id"] or previous["provider_id"] != config["provider_id"]:
+                    fail("SCOPE_MISMATCH", "native operation belongs to another provider scope")
                 if row[1] != request_digest:
                     fail("IDEMPOTENCY_CONFLICT", "operation ID cannot change its request")
                 return operation_view(row)
