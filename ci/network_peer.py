@@ -19,9 +19,11 @@ from test_core import Fixture
 from test_gateway import SOURCE,DAEMON
 
 parser=argparse.ArgumentParser(); parser.add_argument('--ready',required=True); parser.add_argument('--host',default='0.0.0.0'); parser.add_argument('--port',type=int,default=19345)
+parser.add_argument('--enable-hole-punching',action='store_true')
 args=parser.parse_args()
 fixture=Fixture(); fixture.setUp()
 os.environ.update(fixture.env,SCRIPT_PATH=str(SOURCE),CORIUM_NETWORK_ID='default')
+os.environ['CORIUM_ENABLE_HOLE_PUNCHING']='true' if args.enable_hole_punching else 'false'
 namespace={'__name__':'corium_native_peer'}; nodes=ast.parse(DAEMON).body
 boundary=next(i for i,n in enumerate(nodes) if isinstance(n,ast.ClassDef) and n.name=='SandboxAPI')
 exec(compile(ast.Module(body=nodes[:boundary],type_ignores=[]),str(SOURCE)+':daemon','exec'),namespace)

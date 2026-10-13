@@ -18,7 +18,7 @@ class Network(unittest.TestCase):
         for name,ns,ip in [('a','corium-a','10.81.1.2'),('b','corium-b','10.81.2.2'),('relay','corium-wan','198.18.0.2')]:
             ready=pathlib.Path(os.environ['RUNNER_TEMP'])/(name+'-peer.json'); ready.unlink(missing_ok=True)
             log=pathlib.Path('ci-logs')/(name+'-peer.log'); stream=log.open('w'); self.addCleanup(stream.close)
-            proc=subprocess.Popen(['ip','netns','exec',ns,'env','PATH='+os.environ['PATH'],'PYTHONPATH='+str(SOURCE.parent),'python3','ci/network_peer.py','--ready',str(ready)],stdout=stream,stderr=stream,start_new_session=True)
+            proc=subprocess.Popen(['ip','netns','exec',ns,'env','PATH='+os.environ['PATH'],'PYTHONPATH='+str(SOURCE.parent),'python3','ci/network_peer.py','--enable-hole-punching','--ready',str(ready)],stdout=stream,stderr=stream,start_new_session=True)
             self.addCleanup(self.stop,proc)
             deadline=time.monotonic()+30
             while time.monotonic()<deadline and not ready.exists() and proc.poll() is None: time.sleep(.1)
