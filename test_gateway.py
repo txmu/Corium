@@ -150,6 +150,12 @@ class GatewayTests(unittest.TestCase):
 
     def test_punch_identity_address_and_worker_admission(self):
         from unittest.mock import patch
+        old = os.environ.get('CORIUM_ENABLE_HOLE_PUNCHING')
+        os.environ['CORIUM_ENABLE_HOLE_PUNCHING']='true'
+        def restore():
+            if old is None: os.environ.pop('CORIUM_ENABLE_HOLE_PUNCHING',None)
+            else: os.environ['CORIUM_ENABLE_HOLE_PUNCHING']=old
+        self.addCleanup(restore)
         target = 'b'*64
         with sqlite3.connect(self.dht) as db:
             for index, identity in enumerate((self.identity,target)):

@@ -17945,6 +17945,7 @@ dht_server_daemon() {
             export CORIUM_GATEWAY_PORT="${CORIUM_TEST_GATEWAY_PORT:-${CORIUM_GATEWAY_PORT:-${gateway_port:-8080}}}"
             export CORIUM_STUN_SERVERS="${P2P_STUN_SERVERS}"
             export CORIUM_ENABLE_UPNP="${P2P_ENABLE_UPNP}"
+            export CORIUM_ENABLE_HOLE_PUNCHING="${P2P_ENABLE_HOLE_PUNCHING}"
             export USER_PUBLIC_KEY_FILE="$USER_PUBLIC_KEY_FILE"
             export CORIUM_USER_PUBLIC_KEY_FILE="$USER_PUBLIC_KEY_FILE"
             export USER_IDENTITY_FILE="$USER_IDENTITY_FILE"
@@ -19188,6 +19189,8 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         # Bounded punch workers only dial authenticated stored destinations.
         elif msg_type in ("PUNCH_HOLE_SIGNAL", "PUNCH_HOLE_EXECUTE"):
             try:
+                if os.environ.get('CORIUM_ENABLE_HOLE_PUNCHING', 'false').lower() != 'true':
+                    return {"status":"error","message":"Hole punching disabled"}
                 if msg_type == "PUNCH_HOLE_SIGNAL":
                     target, requester, advertised = payload.split('|', 2)
                     if requester != sender_id or not re.fullmatch(r'[a-f0-9]{64}', target) or target == requester:
