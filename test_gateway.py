@@ -147,6 +147,21 @@ class GatewayTests(unittest.TestCase):
         ids=[entry.split(':')[0] for entry in response['data'].removeprefix('NODES:').split()]
         self.assertEqual(ids,[f'{n:064x}' for n in [1,16,255]])
         self.assertEqual(self.rpc('FIND_NODE','bad')['status'],'error')
+
+    def test_punch_identity_address_and_worker_admission(self):
+        from unittest.mock import patch
+        target = 'b'*64
+        with sqlite3.connect(self.dht) as db:
+            for index, identity in enumerate((self.identity,target)):
+                db.execute('INSERT INTO nodes(id,address_type,address,port,last_seen,distance) VALUES (?,\'ipv4\',\'127.0.0.1\',?,0,0)',(identity,19000+index))
+        with patch.object(self.handler,'_ipc_call',return_value='ok') as ipc:
+            for payload in [target+'|'+target+'|ipv4:127.0.0.1',target+'|'+self.identity+'|ipv4:192.0.2.9',target+'|'+self.identity+'|'+'ipv4:127.0.0.1|'*10]:
+                self.assertEqual(self.rpc('PUNCH_HOLE_SIGNAL',payload)['status'],'error')
+            packet = target+'|'+self.identity+'|ipv4:127.0.0.1'
+            self.assertEqual(self.rpc('PUNCH_HOLE_SIGNAL',packet)['status'],'success')
+            self.assertIn(self.identity+':ipv4:127.0.0.1:19000',ipc.call_args.args[0][-1])
+            self.assertEqual(self.rpc('PUNCH_HOLE_SIGNAL',packet)['status'],'error')
+            self.assertEqual(ipc.call_count,1)
     def test_grievance_duplicate_atomic_token_consumption(self):
         with sqlite3.connect(self.dht) as db:db.execute('INSERT INTO distrusted_peers VALUES (?,?,0,0)',(self.identity,self.identity))
         first=self.rpc('GRIEVANCE_MESSAGE','中文🙂')

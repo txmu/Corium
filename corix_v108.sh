@@ -18966,6 +18966,36 @@ class IPC_Gateway_Thread(threading.Thread):
 
 # --- CoriumGatewayHandler (完整且修正版) ---
 class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
+    punch_slots = threading.BoundedSemaphore(4)
+    punch_lock = threading.Lock()
+    punch_recent = {}
+
+    def _punch_admit(self, sender):
+        now = time.monotonic()
+        with self.punch_lock:
+            type(self).punch_recent = {k:v for k,v in self.punch_recent.items() if v > now}
+            if sender in self.punch_recent or len(self.punch_recent) >= 256: return False
+            self.punch_recent[sender] = now + 30
+            return True
+
+    def _punch_addresses(self, requester, advertised):
+        if not re.fullmatch(r"[a-f0-9]{64}", requester) or len(advertised) > 2048: return []
+        claims = advertised.split("|")
+        if not 1 <= len(claims) <= 4 or len(set(claims)) != len(claims): return []
+        rows = db_query_ro(DHT_DB_PATH, "SELECT address_type,address,port FROM nodes WHERE id=? LIMIT 4", (requester,), fetch_all=True)
+        if not rows: return []
+        approved = []
+        for kind, address, port in rows:
+            if kind not in ("ipv4", "ipv6") or type(port) is not int or not 1 <= port <= 65535: continue
+            try:
+                import ipaddress
+                parsed = ipaddress.ip_address(address)
+                if parsed.is_unspecified or parsed.is_multicast: continue
+            except ValueError: continue
+            short = f"{kind}:{address}"
+            full = f"{requester}:{kind}:{address}:{port}"
+            if short in claims or full in claims: approved.append(full)
+        return approved
 
     def __init__(self, *args, **kwargs):
         # We detect if we are in public gateway mode by checking an environment variable.
@@ -19139,7 +19169,7 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         elif msg_type in ("FIND_NODE", "FIND_VALUE"):
             if not re.fullmatch(r'[a-f0-9]{64}', payload):
                 return {"status": "error", "message": "Invalid lookup target"}
-            nodes_raw = db_query_ro(DHT_DB_PATH, "SELECT id, address_type, address, port FROM nodes;", fetch_all=True)
+            nodes_raw = db_query_ro(DHT_DB_PATH, "SELECT id, address_type, address, port FROM nodes ORDER BY last_seen DESC,id LIMIT 1024;", fetch_all=True)
             if nodes_raw is None: return {"status": "error", "message": "Routing database unavailable"}
             nodes_raw = sorted((r for r in nodes_raw if re.fullmatch(r'[a-f0-9]{64}',r[0])),key=lambda r:(int(r[0],16)^int(payload,16),r[0],r[1],r[2]))[:10]
             nodes_list = [f"{r[0]}:{r[1]}:{r[2]}" + (f":{r[3]}" if r[3] else "") for r in nodes_raw]
@@ -19148,34 +19178,45 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
             if msg_type == "FIND_VALUE":
                 local_info = db_query_ro(DHT_DB_PATH, "SELECT 1 FROM local_chunks WHERE hash = ?", (payload,), fetch_one=True)
                 if local_info: return {"status": "success", "data": "FOUND_CHUNK"}
-                announced = db_query_ro(DHT_DB_PATH,"SELECT N.id,N.address_type,N.address,N.port FROM chunks C JOIN json_each(C.nodes) P JOIN nodes N ON N.id=P.value WHERE C.hash=? ORDER BY N.id",(payload,),fetch_all=True)
+                announced = db_query_ro(DHT_DB_PATH,"SELECT N.id,N.address_type,N.address,N.port FROM chunks C JOIN json_each(C.nodes) P JOIN nodes N ON N.id=P.value WHERE C.hash=? ORDER BY N.id LIMIT 10",(payload,),fetch_all=True)
                 if announced is None: return {"status":"error","message":"Provider database unavailable"}
                 hints = [f"{r[0]}:{r[1]}:{r[2]}"+(f":{r[3]}" if r[3] else "") for r in announced if re.fullmatch(r'[a-f0-9]{64}',r[0])]
-                nodes_str = " ".join(dict.fromkeys(hints+nodes_list))
+                nodes_str = " ".join(list(dict.fromkeys(hints+nodes_list))[:10])
             
             return {"status": "success", "data": f"NODES:{nodes_str}"}
 
-        # --- [已添加] 处理中继节点收到的打洞信令 ---
-        elif msg_type == "PUNCH_HOLE_SIGNAL":
+        # Bounded punch workers only dial authenticated stored destinations.
+        elif msg_type in ("PUNCH_HOLE_SIGNAL", "PUNCH_HOLE_EXECUTE"):
             try:
-                final_target_id, requester_id, requester_addresses_str = payload.split('|', 2)
-                bilingual_print(f"Relaying hole punch signal from {requester_id[:12]} to {final_target_id[:12]}", f"正在中继打洞信令，从 {requester_id[:12]} 到 {final_target_id[:12]}", "INFO")
-                punch_payload = f"{requester_id}|{requester_addresses_str}"
-                self._ipc_call(['_internal_dht_send', final_target_id, 'PUNCH_HOLE_EXECUTE', punch_payload])
-                return {"status": "success", "data": "SIGNAL_RELAYED"}
-            except Exception as e:
-                return {"status": "error", "message": "Invalid signal payload"}
-
-        # --- [已添加] 处理目标节点收到的执行打洞的指令 ---
-        elif msg_type == "PUNCH_HOLE_EXECUTE":
-            try:
-                requester_id, requester_addresses_str = payload.split('|', 1)
-                bilingual_print(f"Received instruction to hole punch to {requester_id[:12]}", f"收到向 {requester_id[:12]} 打洞的指令", "INFO")
-                for addr_str in requester_addresses_str.split('|'):
-                    threading.Thread(target=self._ipc_call, args=(['_internal_dht_send_to_addr', addr_str, 'PING', 'PUNCH_BACK'],)).start()
-                return {"status": "success", "data": "PUNCH_ATTEMPTED"}
-            except Exception as e:
-                return {"status": "error", "message": "Invalid punch payload"}
+                if msg_type == "PUNCH_HOLE_SIGNAL":
+                    target, requester, advertised = payload.split('|', 2)
+                    if requester != sender_id or not re.fullmatch(r'[a-f0-9]{64}', target) or target == requester:
+                        return {"status":"error","message":"Invalid punch identity"}
+                    if not db_query_ro(DHT_DB_PATH, 'SELECT 1 FROM nodes WHERE id=?', (target,), fetch_one=True):
+                        return {"status":"error","message":"Unknown punch target"}
+                else:
+                    requester, advertised = payload.split('|', 1)
+                    if not db_query_ro(DHT_DB_PATH, 'SELECT 1 FROM nodes WHERE id=?', (sender_id,), fetch_one=True):
+                        return {"status":"error","message":"Unknown punch relay"}
+                addresses = self._punch_addresses(requester, advertised)
+                if not addresses or not self._punch_admit(sender_id) or not self.punch_slots.acquire(False):
+                    return {"status":"error","message":"Punch admission denied"}
+                if msg_type == "PUNCH_HOLE_SIGNAL":
+                    try:
+                        result = self._ipc_call(['_internal_dht_send', target, 'PUNCH_HOLE_EXECUTE', requester+'|'+'|'.join(addresses)])
+                        return {"status":"success","data":"SIGNAL_RELAYED"} if result is not None else {"status":"error","message":"Punch relay unavailable"}
+                    finally: self.punch_slots.release()
+                def execute():
+                    try:
+                        for address in addresses:
+                            self._ipc_call(['_internal_dht_send_to_addr', address, 'PING', 'PUNCH_BACK'])
+                    finally: self.punch_slots.release()
+                try: threading.Thread(target=execute, daemon=True).start()
+                except BaseException:
+                    self.punch_slots.release(); raise
+                return {"status":"success","data":"PUNCH_ATTEMPTED"}
+            except (ValueError, TypeError):
+                return {"status":"error","message":"Invalid punch payload"}
 
         # --- [已添加] 处理中继消息请求 ---
         elif msg_type == "RELAY_MESSAGE":
