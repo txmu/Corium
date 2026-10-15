@@ -2332,6 +2332,10 @@ def native_ec_verify(public, signature, message):
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.exceptions import InvalidSignature
     try:
+        if (not isinstance(public, str) or not 1 <= len(public) <= 4096 or
+                not isinstance(signature, str) or not 1 <= len(signature) <= 256 or
+                not isinstance(message, bytes)):
+            raise ValueError()
         key = serialization.load_pem_public_key(public.encode())
         if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256K1):
             raise ValueError()
@@ -5326,6 +5330,10 @@ def native_ec_verify(public, signature, message):
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.exceptions import InvalidSignature
     try:
+        if (not isinstance(public, str) or not 1 <= len(public) <= 4096 or
+                not isinstance(signature, str) or not 1 <= len(signature) <= 256 or
+                not isinstance(message, bytes)):
+            raise ValueError()
         key = serialization.load_pem_public_key(public.encode())
         if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256K1):
             raise ValueError()
@@ -8328,6 +8336,10 @@ def native_ec_verify(public, signature, message):
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.exceptions import InvalidSignature
     try:
+        if (not isinstance(public, str) or not 1 <= len(public) <= 4096 or
+                not isinstance(signature, str) or not 1 <= len(signature) <= 256 or
+                not isinstance(message, bytes)):
+            raise ValueError()
         key = serialization.load_pem_public_key(public.encode())
         if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256K1):
             raise ValueError()
@@ -10974,6 +10986,10 @@ def native_ec_verify(public, signature, message):
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.exceptions import InvalidSignature
     try:
+        if (not isinstance(public, str) or not 1 <= len(public) <= 4096 or
+                not isinstance(signature, str) or not 1 <= len(signature) <= 256 or
+                not isinstance(message, bytes)):
+            raise ValueError()
         key = serialization.load_pem_public_key(public.encode())
         if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256K1):
             raise ValueError()
@@ -13561,6 +13577,10 @@ def native_ec_verify(public, signature, message):
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.exceptions import InvalidSignature
     try:
+        if (not isinstance(public, str) or not 1 <= len(public) <= 4096 or
+                not isinstance(signature, str) or not 1 <= len(signature) <= 256 or
+                not isinstance(message, bytes)):
+            raise ValueError()
         key = serialization.load_pem_public_key(public.encode())
         if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256K1):
             raise ValueError()
@@ -16148,6 +16168,10 @@ def native_ec_verify(public, signature, message):
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.exceptions import InvalidSignature
     try:
+        if (not isinstance(public, str) or not 1 <= len(public) <= 4096 or
+                not isinstance(signature, str) or not 1 <= len(signature) <= 256 or
+                not isinstance(message, bytes)):
+            raise ValueError()
         key = serialization.load_pem_public_key(public.encode())
         if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256K1):
             raise ValueError()
