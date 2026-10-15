@@ -23309,7 +23309,7 @@ blockchain_mine_block() (
     mining_committed=true
     dht_announce_chunk "$block_hash" >/dev/null || warn "区块已提交，DHT 公告未完成。 / Block committed; DHT announcement incomplete."
     _blockchain_broadcast_new_block "$block_hash" || warn "区块已提交，但广播未完成。/ Block committed; broadcast incomplete."
-    msg "新区块 $height (哈希: $block_hash) 已成功创建并广播至网络。 (New block $height (hash: $block_hash) successfully created and broadcast to the network.)"
+    msg "新区块 $height (哈希: $block_hash) 已本地提交；传播结果见上方日志。 (New block $height (hash: $block_hash) committed locally; see propagation results above.)"
     echo "$block_hash"
     
 )
@@ -36734,7 +36734,8 @@ _update_chain_state_cache() {
                         "$tx_hash" "$sender_id" "$recipient_id" "$mail_object_hash" "$tx_timestamp"
                     ;;
                 "submit_math_proof")
-                    local problem_id proposed_result CHALLENGE_WINDOW=10 deadline=$((height + CHALLENGE_WINDOW))
+                    local problem_id proposed_result CHALLENGE_WINDOW=10 deadline
+                    deadline=$((height + CHALLENGE_WINDOW))
                     problem_id=$(echo "$tx_payload" | jq -r .problem_id)
                     proposed_result=$(echo "$tx_payload" | jq -r .proposed_result)
                     db_execute_safe "$BLOCKCHAIN_DB" "INSERT INTO pending_proofs (problem_id, proof_tx_hash, proposer_id, proposed_result, confirmation_deadline_height) VALUES (%s, %s, %s, %s, %d);" "$problem_id" "$tx_hash" "$sender_id" "$proposed_result" "$deadline"

@@ -27,6 +27,18 @@ class Compute(Fixture):
         with sqlite3.connect(self.chain) as db:
             tx=db.execute("SELECT hash FROM transactions WHERE type='submit_math_proof'").fetchone()[0]
         self.validate_transaction(tx)
+        # Exercise the real producer/state machine, including restart-safe proof
+        # state. A declaration must not evaluate deadline before its window.
+        result=self.run_core('blockchain_mine_block')
+        self.assertNotIn('successfully created and broadcast',result.stdout)
+        with sqlite3.connect(self.chain) as db:
+            height=db.execute('SELECT block_height FROM transactions WHERE hash=?',(tx,)).fetchone()[0]
+            deadline=db.execute('SELECT confirmation_deadline_height FROM pending_proofs WHERE proof_tx_hash=?',(tx,)).fetchone()[0]
+        self.assertEqual(height,1)
+        self.assertEqual(deadline,height+10)
+        self.run_core('_internal_rebuild_derived_state')
+        with sqlite3.connect(self.chain) as db:
+            self.assertEqual(db.execute('SELECT confirmation_deadline_height FROM pending_proofs WHERE proof_tx_hash=?',(tx,)).fetchone()[0],deadline)
         forged=dict(proof['proof_data'],submitter_id='f'*64)
         tx=self.put_transaction('submit_math_proof',dict(proof,proof_data=forged),99)
         self.validate_transaction(tx,ok=False)
