@@ -21438,7 +21438,7 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
             # --- Branch A: Use the built-in RestrictedPython engine (backward compatibility) ---
             bilingual_print(f"Routing DApp '{domain_name}' to built-in RestrictedPython engine.",
                             f"正在将 DApp '{domain_name}' 路由至内置的 RestrictedPython 引擎。", "DEBUG")
-            self._execute_with_builtin_engine(gateway_app_config, path_parts, query_params)
+            self._execute_with_builtin_engine(gateway_app_config, path_parts, query_params, domain_name)
         else:
             # --- 分支 B: 代理到自定义的 dapp_engine 模组 ---
             # --- Branch B: Proxy to a custom dapp_engine mod ---
@@ -21446,7 +21446,7 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                             f"正在将 DApp '{domain_name}' 路由至自定义引擎: {engine_pkg_id}", "INFO")
             self._proxy_to_custom_engine(engine_pkg_id)
             
-    def _execute_with_builtin_engine(self, gateway_app_config, path_parts, query_params):
+    def _execute_with_builtin_engine(self, gateway_app_config, path_parts, query_params, domain_name=""):
         """
         The new logic for running DApps using both Language and OS Sandboxing.
         使用语言级 (RestrictedPython) + 操作系统级 (bwrap) 运行 DApp 的新逻辑。
@@ -21460,8 +21460,9 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         try:
             # We call our new bash internal command that runs bwrap
             import subprocess
+            req_data = {'path': path_parts, 'query': query_params, 'app_id': domain_name}
             result = subprocess.run(
-                [SCRIPT_PATH, '--quiet', '_internal_run_dapp_sandboxed', app_hash, json.dumps({'path': path_parts, 'query': query_params})],
+                [SCRIPT_PATH, '--quiet', '_internal_run_dapp_sandboxed', app_hash, json.dumps(req_data), domain_name],
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode != 0:
@@ -21612,8 +21613,15 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
 
 class SandboxAPI:
     def __init__(self, request_handler):
-        self.handler = request_handler
-        self.app_id = urlparse(self.handler.path).path.strip('/').split('/')[1]
+        if isinstance(request_handler, str):
+            self.handler = None
+            self.app_id = request_handler
+        elif hasattr(request_handler, 'path'):
+            self.handler = request_handler
+            self.app_id = urlparse(self.handler.path).path.strip('/').split('/')[1]
+        else:
+            self.handler = request_handler
+            self.app_id = getattr(request_handler, 'app_id', 'dapp')
     
     def log(self, msg_en, msg_zh=""):
         bilingual_print(f"[APP:{self.app_id}] {msg_en}", f"[应用:{self.app_id}] {msg_zh}", "APP_LOG")
@@ -33218,7 +33226,8 @@ _internal_dht_send() {
 
 _internal_run_dapp_sandboxed() {
     local app_hash="$1"
-    local query_params_json="$2"
+    local query_params_json="${2:-"{}"}"
+    local app_id="${3:-}"
     
     # 1. Fetch DApp source
     local source_file
@@ -33227,6 +33236,11 @@ _internal_run_dapp_sandboxed() {
         echo "<h1>Sandbox Error: Failed to fetch DApp source.</h1>"
         return 1
     fi
+
+    if [ -z "$app_id" ]; then
+        app_id=$(python3 -c "import sys, json; print(json.loads(sys.argv[1]).get('app_id', ''))" "$query_params_json" 2>/dev/null || true)
+    fi
+    [ -z "$app_id" ] && app_id="${app_hash:0:16}"
     
     # 2. Create runner script
     local temp_dir
@@ -33235,20 +33249,158 @@ _internal_run_dapp_sandboxed() {
     
     cat << 'EOF_PY' > "$runner_script"
 import sys
+import os
 import json
+import base64
 from RestrictedPython import compile_restricted, safe_globals
+from RestrictedPython.Eval import default_guarded_getitem, default_guarded_getiter
+from RestrictedPython.Guards import safer_getattr, full_write_guard, guarded_iter_unpack_sequence
+
+class SandboxAPI:
+    """
+    DApp API interface bridging the restricted sandbox execution to Corium core.
+    """
+    def __init__(self, app_id="dapp", socket_path="/app/corix.sock", vault_path="/data"):
+        self.app_id = app_id
+        self.socket_path = socket_path if os.path.exists(socket_path) else None
+        self.vault_path = vault_path if os.path.exists(vault_path) else os.path.join(os.path.dirname(__file__), "data")
+        os.makedirs(self.vault_path, exist_ok=True)
+
+    def log(self, msg_en, msg_zh=""):
+        msg = f"[APP:{self.app_id}] {msg_en}"
+        if msg_zh:
+            msg += f" / {msg_zh}"
+        print(msg, file=sys.stderr)
+
+    def _get_vault_physical_path(self, relative_path=""):
+        if os.path.isabs(relative_path) or ".." in relative_path.split(os.path.sep):
+            self.log(f"SECURITY ALERT: Vault path traversal blocked: {relative_path}")
+            return None
+        return os.path.normpath(os.path.join(self.vault_path, relative_path))
+
+    def write_to_vault(self, filepath, content):
+        path = self._get_vault_physical_path(filepath)
+        if not path:
+            return {"status": "error", "message": "Invalid vault path."}
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return {"status": "success"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def read_from_vault(self, filepath):
+        path = self._get_vault_physical_path(filepath)
+        if not path:
+            return {"status": "error", "message": "Invalid vault path."}
+        try:
+            if not os.path.exists(path):
+                return {"status": "error", "message": "File not found in vault."}
+            with open(path, "r", encoding="utf-8") as f:
+                return {"status": "success", "data": f.read()}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def list_vault(self, directory=""):
+        path = self._get_vault_physical_path(directory)
+        if not path:
+            return {"status": "error", "message": "Invalid vault path."}
+        try:
+            if not os.path.isdir(path):
+                return {"status": "error", "message": "Not a directory."}
+            items = []
+            for item in os.listdir(path):
+                item_path = os.path.join(path, item)
+                item_type = 'dir' if os.path.isdir(item_path) else 'file'
+                items.append({'name': item, 'type': item_type})
+            return {"status": "success", "data": items}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def delete_from_vault(self, filepath):
+        path = self._get_vault_physical_path(filepath)
+        if not path:
+            return {"status": "error", "message": "Invalid vault path."}
+        try:
+            if os.path.isdir(path):
+                import shutil
+                shutil.rmtree(path)
+            elif os.path.isfile(path):
+                os.remove(path)
+            else:
+                return {"status": "error", "message": "File or directory not found."}
+            return {"status": "success"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def _ipc_request(self, method, params):
+        if not self.socket_path:
+            return {"status": "error", "message": "IPC socket not available in sandbox."}
+        try:
+            import socket
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(5.0)
+                s.connect(self.socket_path)
+                req = {"method": method, "mod_name": self.app_id, "params": params, "id": 1}
+                s.sendall(json.dumps(req).encode('utf-8'))
+                raw = s.recv(65536)
+                if not raw:
+                    return {"status": "error", "message": "Empty IPC response"}
+                res = json.loads(raw.decode('utf-8'))
+                if "result" in res:
+                    return {"status": "success", "data": res["result"]}
+                return {"status": "error", "message": res.get("error", {}).get("message", "IPC error")}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def create_transaction(self, tx_type, tx_data_json_string):
+        res = self._ipc_request('create_transaction', [tx_type, tx_data_json_string])
+        return res.get('data') if res.get('status') == 'success' else None
+
+    def nns_resolve(self, domain_name):
+        res = self._ipc_request('nns_resolve', [domain_name])
+        return res.get('data') if res.get('status') == 'success' else None
+
+    def p2p_get(self, object_hash):
+        res = self._ipc_request('p2p_download', [object_hash])
+        if res.get('status') == 'success' and res.get('data'):
+            try:
+                return base64.b64decode(res['data']).decode('utf-8', errors='replace')
+            except Exception:
+                return None
+        return None
+
+    def p2p_get_bytes(self, object_hash):
+        res = self._ipc_request('p2p_download', [object_hash])
+        if res.get('status') == 'success' and res.get('data'):
+            try:
+                return base64.b64decode(res['data'])
+            except Exception:
+                return None
+        return None
+
+    def p2p_upload(self, content_string):
+        res = self._ipc_request('p2p_upload', [content_string])
+        return res.get('data') if res.get('status') == 'success' else None
+
+    def request_signature(self, data_to_sign_b64):
+        res = self._ipc_request('request_signature', [data_to_sign_b64])
+        return res.get('data') if res.get('status') == 'success' else None
+
 
 def main():
     try:
-        with open("/app/source.py", "r") as f:
+        source_path = "/app/source.py" if os.path.exists("/app/source.py") else os.path.join(os.path.dirname(__file__), "source.py")
+        with open(source_path, "r", encoding="utf-8") as f:
             app_source = f.read()
     except Exception as e:
         print(f"<h1>Error loading source: {e}</h1>")
         return
         
     try:
-        req = json.loads(sys.argv[1])
-    except:
+        req = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {'path': [], 'query': {}}
+    except Exception:
         req = {'path': [], 'query': {}}
         
     try:
@@ -33257,8 +33409,25 @@ def main():
         print(f"<h1>Compilation Error: {e}</h1>")
         return
         
+    app_id = req.get('app_id') or (sys.argv[2] if len(sys.argv) > 2 else 'dapp')
+    socket_path = "/app/corix.sock" if os.path.exists("/app/corix.sock") else "/tmp/corix.sock"
+    api = SandboxAPI(app_id=app_id, socket_path=socket_path, vault_path="/data")
+
     sandbox_globals = safe_globals.copy()
-    exec_namespace = {'request': req}
+    sandbox_globals.update({
+        'any': any, 'all': all, 'min': min, 'max': max, 'sum': sum, 'sorted': sorted,
+        'enumerate': enumerate, 'zip': zip, 'reversed': reversed,
+        '_getitem_': default_guarded_getitem,
+        '_getiter_': default_guarded_getiter,
+        '_getattr_': safer_getattr,
+        '_write_': full_write_guard,
+        '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
+    })
+
+    exec_namespace = {
+        'request': req,
+        'api': api,
+    }
     
     try:
         exec(code_obj, sandbox_globals, exec_namespace)
@@ -33270,7 +33439,37 @@ if __name__ == '__main__':
     main()
 EOF_PY
 
-    cp "$source_file" "${temp_dir}/source.py"
+    if python3 -c 'import sys, json; data=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(data, dict) and "chunks" in data else 1)' "$source_file" 2>/dev/null; then
+        local assembled="${temp_dir}/assembled_source.py"
+        python3 - "$source_file" "$assembled" "${SCRIPT_PATH:-$0}" <<'PY_UNPACK'
+import sys, json, os, subprocess
+manifest = json.load(open(sys.argv[1]))
+chunks = manifest.get('chunks', [])
+script = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else os.environ.get('SCRIPT_PATH', sys.argv[0])
+with open(sys.argv[2], 'wb') as out_f:
+    for ch in chunks:
+        chunk_file = os.path.join(os.environ.get('VAR_LIB_CORIUM_DIR', '/var/lib/corix'), 'p2p', 'objects', ch)
+        if os.path.exists(chunk_file):
+            with open(chunk_file, 'rb') as cf:
+                out_f.write(cf.read())
+        else:
+            p = subprocess.run([script, '--quiet', '_internal_p2p_get_bytes', ch], stdout=subprocess.PIPE, check=True)
+            out_f.write(p.stdout)
+PY_UNPACK
+        if [ -s "$assembled" ]; then
+            cp "$assembled" "${temp_dir}/source.py"
+        else
+            cp "$source_file" "${temp_dir}/source.py"
+        fi
+    else
+        cp "$source_file" "${temp_dir}/source.py"
+    fi
+
+    local dapp_vault_dir="${DAPP_DATA_DIR:-${VAR_LIB_CORIUM_DIR:-/tmp}/dapp_data}/${app_id//[^a-zA-Z0-9_.-]/_}"
+    mkdir -p "$dapp_vault_dir"
+
+    local ipc_socket="${CORIUM_IPC_SOCKET_PATH:-${CORIUM_ROOT%/}/run/corix.${CORIUM_NETWORK_ID_OVERRIDE:-default}.sock}"
+    [ -S "$ipc_socket" ] || ipc_socket="/tmp/corix.${CORIUM_NETWORK_ID_OVERRIDE:-default}.sock"
 
     # 3. Setup sandbox using bwrap
     local -a bwrap_args=(
@@ -33281,13 +33480,21 @@ EOF_PY
         "--ro-bind" "/sbin" "/sbin"
         "--ro-bind" "/lib" "/lib"
         "--ro-bind" "${temp_dir}" "/app"
+        "--bind" "$dapp_vault_dir" "/data"
         "--chdir" "/app"
     )
     [ -d /lib64 ] && bwrap_args+=(--ro-bind /lib64 /lib64)
     [ -d /etc/alternatives ] && bwrap_args+=(--ro-bind /etc/alternatives /etc/alternatives)
+    if [ -S "$ipc_socket" ]; then
+        bwrap_args+=(--ro-bind "$ipc_socket" "/app/corix.sock")
+    fi
     
     # Run sandbox and capture output
-    timeout --kill-after=2s "5s" prlimit --as=134217728 bwrap "${bwrap_args[@]}" python3 /app/runner.py "$query_params_json"
+    if command -v bwrap >/dev/null 2>&1; then
+        timeout --kill-after=2s "5s" prlimit --as=134217728 bwrap "${bwrap_args[@]}" python3 /app/runner.py "$query_params_json" "$app_id"
+    else
+        python3 "${runner_script}" "$query_params_json" "$app_id"
+    fi
     
     rm -rf "$temp_dir" "$source_file"
 }
@@ -44276,18 +44483,39 @@ while retaining decentralized synchronization capabilities.
       **As a performance optimization layer for the "Pure P2P Model."**
 
 --------------------------------------------------------------------------------
-结论与推荐 (Conclusion & Recommendation)
+沙箱执行环境与 API 调用规范
+Sandbox Execution Environment & API Specification
 --------------------------------------------------------------------------------
 
-对于新的 DApp 开发，我们**强烈推荐使用“数据保险库模型”**。
-For new DApp development, we **strongly recommend using the "Data Vault Model."**
+Corium 内置沙箱引擎 (RestrictedPython + Bubblewrap OS 沙箱) 运行 DApp 时，
+会自动向受限命名空间注入两个核心对象：
+When running a DApp via the built-in sandbox engine (RestrictedPython + Bubblewrap OS sandbox),
+Corium automatically injects two core objects into the restricted namespace:
 
-它为您提供了构建功能丰富、用户体验优秀的应用所需的高性能本地存储，同时通过与区块链和 P2P 网络的结合，保留了去中心化和数据主权的强大优势。
-It provides the high-performance local storage you need to build feature-rich, user-friendly applications,
-while preserving the powerful advantages of decentralization and data sovereignty through its integration with the blockchain and P2P network.
+1. `request`: 包含客户端 HTTP 请求信息的字典。
+   A dictionary containing incoming client HTTP request information:
+   - `request['path']`: 路由路径片段列表 / Route path segments list (e.g. ['view', 'detail'])
+   - `request['query']`: 查询参数字典 / Query parameter dictionary
+   - `request['app_id']`: 当前 DApp 标识或域名 / Current DApp ID or domain name
 
-请将“纯 P2P 模型”视为一种用于发布一次性、不可变内容或进行极简状态管理的底层机制。
-Please consider the "Pure P2P Model" as a low-level mechanism for publishing one-time, immutable content or for minimalistic state management.
+2. `api`: 完整的 SandboxAPI 实例，是 DApp 通往 Corium 核心与本地沙箱持久化的标准桥梁。
+   A complete SandboxAPI instance, serving as the standard bridge to Corium core and sandbox persistence:
+   - 数据保险库本地操作 (Data Vault Operations, mapped to /data inside sandbox):
+     * `api.write_to_vault(filepath, content)`: 写入保险库文件 / Write content to vault
+     * `api.read_from_vault(filepath)`: 读取保险库文件 / Read content from vault
+     * `api.list_vault(directory="")`: 列出保险库文件与目录 / List vault contents
+     * `api.delete_from_vault(filepath)`: 删除保险库文件或目录 / Delete vault file or directory
+   - 核心通信与链上交互 (Core Communication & Blockchain Interaction via secure IPC):
+     * `api.log(msg_en, msg_zh="")`: 记录应用安全日志 / Log application message
+     * `api.create_transaction(tx_type, tx_data_json)`: 请求创建区块链交易 / Request transaction
+     * `api.nns_resolve(domain_name)`: 解析 NNS 去中心化域名 / Resolve NNS domain name
+     * `api.p2p_upload(content_string)`: 上传状态快照至 P2P 网络 / Upload state to P2P network
+     * `api.p2p_get(object_hash)` / `api.p2p_get_bytes(object_hash)`: 下载 P2P 对象 / Download P2P object
+     * `api.request_signature(data_to_sign_b64)`: 请求用户私钥签名 / Request cryptographic signature
+
+DApp 程序通过将输出结果赋值给全局 `response` 变量完成渲染：
+DApp scripts return their output by setting the global `response` variable:
+    response = "<h1>Hello from Corium DApp</h1>"
 
 EOF
 }

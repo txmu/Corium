@@ -42,5 +42,21 @@ class NativeIntegrationTests(Fixture):
         self.assertEqual(self.semantic(), before)
         self.run_core('test "$(sqlite3 "$FORUM_DB" "PRAGMA integrity_check;")" = ok')
 
+    def test_dapp_sandbox_injects_working_api(self):
+        script_file = self.root / 'app_test.py'
+        code = (
+            "api.log('dapp sandbox started')\n"
+            "api.write_to_vault('test.txt', 'vault persistent content')\n"
+            "val = api.read_from_vault('test.txt')\n"
+            "items = api.list_vault('')\n"
+            "found = any(i.get('name') == 'test.txt' for i in items.get('data', []))\n"
+            "response = f'<h1>{val.get(\"data\")} - found: {found} - path: {request.get(\"path\")}</h1>'\n"
+        )
+        script_file.write_text(code)
+        file_hash = self.run_core('_p2p_upload_file ' + str(script_file)).stdout.splitlines()[-1].strip()
+        res = self.run_core(f'_internal_run_dapp_sandboxed {file_hash} \x27{{\"path\": [\"demo\"], \"query\": {{}}}}\x27 testapp')
+        self.assertIn('<h1>vault persistent content - found: True - path: [\'demo\']</h1>', res.stdout)
+        self.assertIn('[APP:testapp] dapp sandbox started', res.stderr)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

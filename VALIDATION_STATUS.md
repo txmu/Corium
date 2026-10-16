@@ -21,6 +21,7 @@
 | Forum | 修复 topic/post 识别、JSON/Unicode/附件名转义、manifest 路径及整对象发现；签名或公钥缺失时失败关闭。DB 缺失、object 缺失及 manifest 缺失可从有效对象重建；旧 v108 带换行 PEM author 与旧帖子空白签名保持兼容，不放宽 canonical node identity 校验。 |
 | 身份 / ACL / 内容 | 修复 poisoned identity cache、agent key/hash 绑定、权限升级及成员退出边界；无权限操作失败。治理完整 PEM、重复投票、时间窗口与权益整数边界有实际数据库回归。 |
 | 备份 / 快照 / Shell | SQLite 一致性备份与语义恢复、重复恢复、损坏归档拒绝、rsync snapshot rollback；归档 traversal/symlink/duplicate、文件父目录 symlink、嵌套事务及 SQL 整数边界回归。改善 EXIT/RETURN trap、quoting、临时文件与错误码消费。 |
+| DApp 沙箱 / API | 修复 `_internal_run_dapp_sandboxed` 内置引擎 `runner.py` 仅注入 `request` 而缺失 `api` 对象的调用链缺口。向 RestrictedPython 受限环境注入工作状态的 `SandboxAPI` 实例及完整安全守卫（`_getitem_`、`_getiter_`、`_getattr_`、`_write_`），支持本地数据保险库读写（挂载至 `/data`）与核心 IPC 桥接；补充原生集成回归测试。 |
 
 ## 测试方式与结果
 
