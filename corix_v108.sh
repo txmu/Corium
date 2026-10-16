@@ -27677,6 +27677,7 @@ _init_blockchain_db() {
         timestamp INTEGER NOT NULL,
         block_height INTEGER
     );
+    CREATE INDEX IF NOT EXISTS transactions_block_height_hash ON transactions(block_height, hash);
     
     -- 链状态表 (Chain State Table)
     CREATE TABLE IF NOT EXISTS chain_state (

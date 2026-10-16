@@ -17,3 +17,10 @@ this does not establish a multi-validator network or remote replica.
 
 Executed: `PYTHONPATH=. python3 -m unittest discover -s ci -p test_compute.py -v`
 Result: 4 passed, 0 failed, 0 skipped (21.318 seconds). No native compilation.
+
+The read-only explorer uses the additive `transactions_block_height_hash`
+index on `(block_height, hash)`. New databases create it during native schema
+initialization. Existing operators may add exactly this index during maintenance:
+`CREATE INDEX IF NOT EXISTS transactions_block_height_hash ON transactions(block_height, hash);`
+It changes no signed transaction, block hash, consensus state or payload format.
+The explorer never creates indexes or modifies chain state itself.
