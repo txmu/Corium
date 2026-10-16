@@ -21355,6 +21355,12 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
             return
             
         parsed_path = urlparse(self.path)
+        if parsed_path.path in ('', '/'):
+            self.send_response(302)
+            self.send_header('Location', '/app/explorer')
+            self.end_headers()
+            return
+
         path_parts = parsed_path.path.strip('/').split('/')
         if not path_parts or len(path_parts) < 2:
             self.send_error(404, "Not Found: Invalid path")
@@ -21381,6 +21387,10 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         
         try:
             manifest = json.loads(manifest_content)
+            if isinstance(manifest, dict) and "chunks" in manifest and "files" not in manifest and "gateway_app" not in manifest:
+                chunks = manifest.get("chunks", [])
+                full_bytes = b"".join(self._ipc_call(['_internal_p2p_get_bytes', ch], is_binary=True) or b"" for ch in chunks)
+                manifest = json.loads(full_bytes.decode('utf-8'))
             file_path = '/'.join(file_path_parts) if file_path_parts else manifest.get('index', 'index.html')
             file_hash = manifest['files'].get(file_path)
             if not file_hash:
@@ -21394,6 +21404,13 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         if file_content is None:
             self.send_error(500, "Content Error")
             return
+
+        try:
+            parsed_fc = json.loads(file_content.decode('utf-8'))
+            if isinstance(parsed_fc, dict) and "chunks" in parsed_fc:
+                file_content = b"".join(self._ipc_call(['_internal_p2p_get_bytes', ch], is_binary=True) or b"" for ch in parsed_fc.get("chunks", []))
+        except Exception:
+            pass
 
         mime_type, _ = mimetypes.guess_type(file_path)
         self.send_response(200)
@@ -21414,22 +21431,26 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         # --- 步骤 1: 获取 DApp 清单 / Step 1: Fetch the DApp Manifest ---
         root_hash = self._ipc_call(['_internal_nns_resolve', domain_name])
         if not root_hash:
-            self.send_error(404, "Domain Not Found / 域名未找到")
+            self.send_error(404, "Domain Not Found")
             return
         
         manifest_content = self._ipc_call(['_internal_p2p_get', root_hash])
         if not manifest_content:
-            self.send_error(500, "Manifest Error / 清单错误", "Could not fetch DApp manifest from P2P network.")
+            self.send_error(500, "Manifest Error", "Could not fetch DApp manifest from P2P network.")
             return
 
         try:
             manifest = json.loads(manifest_content)
+            if isinstance(manifest, dict) and "chunks" in manifest and "files" not in manifest and "gateway_app" not in manifest:
+                chunks = manifest.get("chunks", [])
+                full_bytes = b"".join(self._ipc_call(['_internal_p2p_get_bytes', ch], is_binary=True) or b"" for ch in chunks)
+                manifest = json.loads(full_bytes.decode('utf-8'))
             gateway_app_config = manifest.get('gateway_app', {})
             # [关键] 检查 'engine' 字段
             # [CRITICAL] Check for the 'engine' field
             engine_pkg_id = gateway_app_config.get('engine', 'built-in')
         except (json.JSONDecodeError, KeyError):
-            self.send_error(500, "Manifest Error / 清单错误", "DApp manifest is malformed.")
+            self.send_error(500, "Manifest Error", "DApp manifest is malformed.")
             return
 
         # --- 步骤 2: 路由决策 / Step 2: Routing Decision ---
@@ -33413,8 +33434,30 @@ def main():
     socket_path = "/app/corix.sock" if os.path.exists("/app/corix.sock") else "/tmp/corix.sock"
     api = SandboxAPI(app_id=app_id, socket_path=socket_path, vault_path="/data")
 
+    def safe_import(name, *args, **kwargs):
+        if name in ('json', 'math', 're', 'urllib.parse', 'datetime'):
+            return __import__(name, *args, **kwargs)
+        raise ImportError(f"Import of '{name}' is not permitted in sandbox")
+
     sandbox_globals = safe_globals.copy()
+    safe_builtins = sandbox_globals.get('__builtins__', {}).copy()
+    safe_builtins['__import__'] = safe_import
+    sandbox_globals['__builtins__'] = safe_builtins
+
+    import operator
+    _inplace_ops = {
+        '+=': operator.iadd, '-=': operator.isub, '*=': operator.imul,
+        '/=': operator.itruediv, '//=': operator.ifloordiv, '%=': operator.imod,
+        '**=': operator.ipow, '<<=': operator.ilshift, '>>=': operator.irshift,
+        '&=': operator.iand, '^=': operator.ixor, '|=': operator.ior,
+    }
+    def default_inplacevar(op, x, y):
+        fn = _inplace_ops.get(op)
+        if fn: return fn(x, y)
+        raise ValueError(f"Unsupported in-place operator: {op}")
+
     sandbox_globals.update({
+        'json': json,
         'any': any, 'all': all, 'min': min, 'max': max, 'sum': sum, 'sorted': sorted,
         'enumerate': enumerate, 'zip': zip, 'reversed': reversed,
         '_getitem_': default_guarded_getitem,
@@ -33422,6 +33465,7 @@ def main():
         '_getattr_': safer_getattr,
         '_write_': full_write_guard,
         '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
+        '_inplacevar_': default_inplacevar,
     })
 
     exec_namespace = {
@@ -33486,6 +33530,7 @@ PY_UNPACK
     [ -d /lib64 ] && bwrap_args+=(--ro-bind /lib64 /lib64)
     [ -d /etc/alternatives ] && bwrap_args+=(--ro-bind /etc/alternatives /etc/alternatives)
     if [ -S "$ipc_socket" ]; then
+        touch "${temp_dir}/corix.sock"
         bwrap_args+=(--ro-bind "$ipc_socket" "/app/corix.sock")
     fi
     
@@ -47099,6 +47144,7 @@ if [ "${BASH_SOURCE[0]}" -ef "$0" ]; then
             ;;
         _internal_get_pubkey_path) _internal_get_pubkey_path "$@";;
         _internal_nns_resolve) _internal_nns_resolve "$@";;
+        _internal_p2p_get) _internal_p2p_get_bytes "$@";;
         _internal_p2p_get_bytes) _internal_p2p_get_bytes "$@";;
         _internal_dht_send) _internal_dht_send "$@";;
         _internal_run_dapp_sandboxed) _internal_run_dapp_sandboxed "$@";;
