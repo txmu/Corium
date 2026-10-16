@@ -33383,7 +33383,7 @@ import json
 import base64
 from RestrictedPython import compile_restricted, safe_globals
 from RestrictedPython.Eval import default_guarded_getitem, default_guarded_getiter
-from RestrictedPython.Guards import safer_getattr, full_write_guard, guarded_iter_unpack_sequence
+from RestrictedPython.Guards import safer_getattr, full_write_guard, guarded_iter_unpack_sequence, guarded_unpack_sequence
 
 class SandboxAPI:
     """
@@ -33573,6 +33573,7 @@ def main():
         '_getattr_': safer_getattr,
         '_write_': full_write_guard,
         '_iter_unpack_sequence_': guarded_iter_unpack_sequence,
+        '_unpack_sequence_': guarded_unpack_sequence,
         '_inplacevar_': default_inplacevar,
     })
 
