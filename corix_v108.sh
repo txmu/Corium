@@ -20621,6 +20621,10 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
     punch_slots = threading.BoundedSemaphore(4)
     punch_lock = threading.Lock()
     punch_recent = {}
+    _nns_cache = {}
+    _manifest_cache = {}
+    _cache_lock = threading.Lock()
+    CACHE_TTL = 60.0
 
     def _punch_admit(self, sender):
         now = time.monotonic()
@@ -20662,6 +20666,89 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             stderr_output = e.stderr.decode('utf-8').strip() if hasattr(e, 'stderr') and e.stderr else str(e)
             bilingual_print(f"IPC call failed: {' '.join(args)} -> {stderr_output}", f"IPC调用失败: {' '.join(args)} -> {stderr_output}", "ERROR")
+            return None
+
+    def _direct_nns_resolve(self, domain_name):
+        if FORUM_DB_PATH and os.path.isfile(FORUM_DB_PATH):
+            try:
+                row = db_query_ro(FORUM_DB_PATH, "SELECT target_hash FROM nns_records WHERE domain_name = ?", (domain_name,), fetch_one=True)
+                if row and row[0]:
+                    return row[0].strip()
+            except Exception:
+                pass
+        return None
+
+    def _resolve_nns(self, domain_name):
+        now = time.time()
+        with self._cache_lock:
+            cached = self._nns_cache.get(domain_name)
+            if cached and cached[1] > now:
+                return cached[0]
+
+        target_hash = self._direct_nns_resolve(domain_name)
+        if not target_hash:
+            target_hash = self._ipc_call(['_internal_nns_resolve', domain_name])
+
+        if target_hash:
+            with self._cache_lock:
+                self._nns_cache[domain_name] = (target_hash, now + self.CACHE_TTL)
+        return target_hash
+
+    def _direct_get_bytes(self, object_hash):
+        if not isinstance(object_hash, str) or not re.fullmatch(r'[a-f0-9]{64}', object_hash):
+            return None
+        if DHT_DB_PATH and os.path.isfile(DHT_DB_PATH):
+            try:
+                row = db_query_ro(DHT_DB_PATH, "SELECT file_path, offset, size FROM local_chunks WHERE hash=?", (object_hash,), fetch_one=True)
+                if row:
+                    filepath, offset, size = row
+                    if os.path.isfile(filepath):
+                        with open(filepath, 'rb') as f:
+                            f.seek(offset)
+                            data = f.read(size)
+                            if len(data) == size:
+                                return data
+            except Exception:
+                pass
+        if DHT_DB_PATH:
+            p2p_root = os.path.dirname(DHT_DB_PATH)
+            for sub in ('objects', 'objects/transactions'):
+                cand = os.path.join(p2p_root, sub, object_hash)
+                if os.path.isfile(cand):
+                    try:
+                        with open(cand, 'rb') as f:
+                            return f.read()
+                    except Exception:
+                        pass
+        return None
+
+    def _fetch_object_bytes(self, object_hash):
+        data = self._direct_get_bytes(object_hash)
+        if data is None:
+            data = self._ipc_call(['_internal_p2p_get_bytes', object_hash], is_binary=True)
+        return data
+
+    def _get_manifest(self, root_hash):
+        now = time.time()
+        with self._cache_lock:
+            cached = self._manifest_cache.get(root_hash)
+            if cached and cached[1] > now:
+                return cached[0]
+
+        manifest_bytes = self._fetch_object_bytes(root_hash)
+        if not manifest_bytes:
+            return None
+
+        try:
+            manifest = json.loads(manifest_bytes.decode('utf-8'))
+            if isinstance(manifest, dict) and "chunks" in manifest and "files" not in manifest and "gateway_app" not in manifest:
+                chunks = manifest.get("chunks", [])
+                full_bytes = b"".join(self._fetch_object_bytes(ch) or b"" for ch in chunks)
+                manifest = json.loads(full_bytes.decode('utf-8'))
+            with self._cache_lock:
+                self._manifest_cache[root_hash] = (manifest, now + self.CACHE_TTL)
+            return manifest
+        except Exception:
             return None
 
     def _p2p_get_py(self, object_hash):
@@ -21375,32 +21462,27 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(404, f"Unknown request type: {request_type}")
 
     def handle_static_site(self, domain_name, file_path_parts):
-        root_hash = self._ipc_call(['_internal_nns_resolve', domain_name])
+        root_hash = self._resolve_nns(domain_name)
         if not root_hash:
             self.send_error(404, "Domain Not Found")
             return
 
-        manifest_content = self._ipc_call(['_internal_p2p_get', root_hash])
-        if not manifest_content:
+        manifest = self._get_manifest(root_hash)
+        if not manifest or not isinstance(manifest, dict):
             self.send_error(500, "Manifest Error")
             return
         
         try:
-            manifest = json.loads(manifest_content)
-            if isinstance(manifest, dict) and "chunks" in manifest and "files" not in manifest and "gateway_app" not in manifest:
-                chunks = manifest.get("chunks", [])
-                full_bytes = b"".join(self._ipc_call(['_internal_p2p_get_bytes', ch], is_binary=True) or b"" for ch in chunks)
-                manifest = json.loads(full_bytes.decode('utf-8'))
             file_path = '/'.join(file_path_parts) if file_path_parts else manifest.get('index', 'index.html')
-            file_hash = manifest['files'].get(file_path)
+            file_hash = manifest.get('files', {}).get(file_path)
             if not file_hash:
                 self.send_error(404, "File Not Found")
                 return
-        except (json.JSONDecodeError, KeyError):
+        except Exception:
             self.send_error(500, "Manifest Error")
             return
 
-        file_content = self._ipc_call(['_internal_p2p_get_bytes', file_hash], is_binary=True)
+        file_content = self._fetch_object_bytes(file_hash)
         if file_content is None:
             self.send_error(500, "Content Error")
             return
@@ -21408,7 +21490,7 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         try:
             parsed_fc = json.loads(file_content.decode('utf-8'))
             if isinstance(parsed_fc, dict) and "chunks" in parsed_fc:
-                file_content = b"".join(self._ipc_call(['_internal_p2p_get_bytes', ch], is_binary=True) or b"" for ch in parsed_fc.get("chunks", []))
+                file_content = b"".join(self._fetch_object_bytes(ch) or b"" for ch in parsed_fc.get("chunks", []))
         except Exception:
             pass
 
@@ -21429,27 +21511,22 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         内置的 RestrictedPython 引擎或一个自定义的 dapp_engine 模组。
         """
         # --- 步骤 1: 获取 DApp 清单 / Step 1: Fetch the DApp Manifest ---
-        root_hash = self._ipc_call(['_internal_nns_resolve', domain_name])
+        root_hash = self._resolve_nns(domain_name)
         if not root_hash:
             self.send_error(404, "Domain Not Found")
             return
         
-        manifest_content = self._ipc_call(['_internal_p2p_get', root_hash])
-        if not manifest_content:
+        manifest = self._get_manifest(root_hash)
+        if not manifest or not isinstance(manifest, dict):
             self.send_error(500, "Manifest Error", "Could not fetch DApp manifest from P2P network.")
             return
 
         try:
-            manifest = json.loads(manifest_content)
-            if isinstance(manifest, dict) and "chunks" in manifest and "files" not in manifest and "gateway_app" not in manifest:
-                chunks = manifest.get("chunks", [])
-                full_bytes = b"".join(self._ipc_call(['_internal_p2p_get_bytes', ch], is_binary=True) or b"" for ch in chunks)
-                manifest = json.loads(full_bytes.decode('utf-8'))
             gateway_app_config = manifest.get('gateway_app', {})
             # [关键] 检查 'engine' 字段
             # [CRITICAL] Check for the 'engine' field
             engine_pkg_id = gateway_app_config.get('engine', 'built-in')
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError, Exception):
             self.send_error(500, "Manifest Error", "DApp manifest is malformed.")
             return
 
@@ -33250,12 +33327,45 @@ _internal_run_dapp_sandboxed() {
     local query_params_json="${2:-"{}"}"
     local app_id="${3:-}"
     
-    # 1. Fetch DApp source
-    local source_file
-    source_file=$(_internal_p2p_get_to_temp "$app_hash" 2>/dev/null)
-    if [ -z "$source_file" ] || [ ! -f "$source_file" ]; then
-        echo "<h1>Sandbox Error: Failed to fetch DApp source.</h1>"
-        return 1
+    local cache_dir="${VAR_LIB_CORIUM_DIR:-/tmp}/dapp_cache"
+    local cached_source="${cache_dir}/${app_hash}.py"
+    mkdir -p "$cache_dir"
+
+    # 1. Fetch DApp source (use cache if available)
+    if [ ! -s "$cached_source" ]; then
+        local source_file
+        source_file=$(_internal_p2p_get_to_temp "$app_hash" 2>/dev/null)
+        if [ -z "$source_file" ] || [ ! -f "$source_file" ]; then
+            echo "<h1>Sandbox Error: Failed to fetch DApp source.</h1>"
+            return 1
+        fi
+
+        if python3 -c 'import sys, json; data=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(data, dict) and "chunks" in data else 1)' "$source_file" 2>/dev/null; then
+            local assembled="${cache_dir}/${app_hash}.assembled.tmp"
+            python3 - "$source_file" "$assembled" "${SCRIPT_PATH:-$0}" <<'PY_UNPACK'
+import sys, json, os, subprocess
+manifest = json.load(open(sys.argv[1]))
+chunks = manifest.get('chunks', [])
+script = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else os.environ.get('SCRIPT_PATH', sys.argv[0])
+with open(sys.argv[2], 'wb') as out_f:
+    for ch in chunks:
+        chunk_file = os.path.join(os.environ.get('VAR_LIB_CORIUM_DIR', '/var/lib/corix'), 'p2p', 'objects', ch)
+        if os.path.exists(chunk_file):
+            with open(chunk_file, 'rb') as cf:
+                out_f.write(cf.read())
+        else:
+            p = subprocess.run([script, '--quiet', '_internal_p2p_get_bytes', ch], stdout=subprocess.PIPE, check=True)
+            out_f.write(p.stdout)
+PY_UNPACK
+            if [ -s "$assembled" ]; then
+                mv -f "$assembled" "$cached_source"
+            else
+                cp "$source_file" "$cached_source"
+            fi
+        else
+            cp "$source_file" "$cached_source"
+        fi
+        rm -f "$source_file"
     fi
 
     if [ -z "$app_id" ]; then
@@ -33263,12 +33373,10 @@ _internal_run_dapp_sandboxed() {
     fi
     [ -z "$app_id" ] && app_id="${app_hash:0:16}"
     
-    # 2. Create runner script
-    local temp_dir
-    temp_dir=$(mktemp -d)
-    local runner_script="${temp_dir}/runner.py"
-    
-    cat << 'EOF_PY' > "$runner_script"
+    # 2. Setup runner template & execution directory
+    local runner_template="${cache_dir}/runner_template.py"
+    if [ ! -s "$runner_template" ]; then
+        cat << 'EOF_PY' > "${runner_template}.tmp"
 import sys
 import os
 import json
@@ -33482,32 +33590,13 @@ def main():
 if __name__ == '__main__':
     main()
 EOF_PY
-
-    if python3 -c 'import sys, json; data=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(data, dict) and "chunks" in data else 1)' "$source_file" 2>/dev/null; then
-        local assembled="${temp_dir}/assembled_source.py"
-        python3 - "$source_file" "$assembled" "${SCRIPT_PATH:-$0}" <<'PY_UNPACK'
-import sys, json, os, subprocess
-manifest = json.load(open(sys.argv[1]))
-chunks = manifest.get('chunks', [])
-script = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else os.environ.get('SCRIPT_PATH', sys.argv[0])
-with open(sys.argv[2], 'wb') as out_f:
-    for ch in chunks:
-        chunk_file = os.path.join(os.environ.get('VAR_LIB_CORIUM_DIR', '/var/lib/corix'), 'p2p', 'objects', ch)
-        if os.path.exists(chunk_file):
-            with open(chunk_file, 'rb') as cf:
-                out_f.write(cf.read())
-        else:
-            p = subprocess.run([script, '--quiet', '_internal_p2p_get_bytes', ch], stdout=subprocess.PIPE, check=True)
-            out_f.write(p.stdout)
-PY_UNPACK
-        if [ -s "$assembled" ]; then
-            cp "$assembled" "${temp_dir}/source.py"
-        else
-            cp "$source_file" "${temp_dir}/source.py"
-        fi
-    else
-        cp "$source_file" "${temp_dir}/source.py"
+        mv -f "${runner_template}.tmp" "$runner_template"
     fi
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    cp "$runner_template" "${temp_dir}/runner.py"
+    cp "$cached_source" "${temp_dir}/source.py"
 
     local dapp_vault_dir="${DAPP_DATA_DIR:-${VAR_LIB_CORIUM_DIR:-/tmp}/dapp_data}/${app_id//[^a-zA-Z0-9_.-]/_}"
     mkdir -p "$dapp_vault_dir"
@@ -33538,10 +33627,10 @@ PY_UNPACK
     if command -v bwrap >/dev/null 2>&1; then
         timeout --kill-after=2s "5s" prlimit --as=134217728 bwrap "${bwrap_args[@]}" python3 /app/runner.py "$query_params_json" "$app_id"
     else
-        python3 "${runner_script}" "$query_params_json" "$app_id"
+        python3 "${temp_dir}/runner.py" "$query_params_json" "$app_id"
     fi
     
-    rm -rf "$temp_dir" "$source_file"
+    rm -rf "$temp_dir"
 }
 
 # 此函数允许Python守护进程请求Bash脚本向一个具体的网络地址字符串发送消息。
