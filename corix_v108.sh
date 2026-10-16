@@ -33463,6 +33463,16 @@ class SandboxAPI:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    def get_node_context(self):
+        ctx_path = "/app/node_context.json"
+        if os.path.exists(ctx_path):
+            try:
+                with open(ctx_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
     def _ipc_request(self, method, params):
         if not self.socket_path:
             return {"status": "error", "message": "IPC socket not available in sandbox."}
@@ -33542,8 +33552,13 @@ def main():
     socket_path = "/app/corix.sock" if os.path.exists("/app/corix.sock") else "/tmp/corix.sock"
     api = SandboxAPI(app_id=app_id, socket_path=socket_path, vault_path="/data")
 
+    import hashlib
+    import base64
+    import time
+    import hmac
+
     def safe_import(name, *args, **kwargs):
-        if name in ('json', 'math', 're', 'urllib.parse', 'datetime'):
+        if name in ('json', 'math', 're', 'urllib.parse', 'datetime', 'hashlib', 'base64', 'time', 'hmac'):
             return __import__(name, *args, **kwargs)
         raise ImportError(f"Import of '{name}' is not permitted in sandbox")
 
@@ -33566,6 +33581,10 @@ def main():
 
     sandbox_globals.update({
         'json': json,
+        'hashlib': hashlib,
+        'base64': base64,
+        'time': time,
+        'hmac': hmac,
         'any': any, 'all': all, 'min': min, 'max': max, 'sum': sum, 'sorted': sorted,
         'enumerate': enumerate, 'zip': zip, 'reversed': reversed,
         '_getitem_': default_guarded_getitem,
@@ -33577,13 +33596,12 @@ def main():
         '_inplacevar_': default_inplacevar,
     })
 
-    exec_namespace = {
-        'request': req,
-        'api': api,
-    }
+    exec_namespace = sandbox_globals
+    exec_namespace['request'] = req
+    exec_namespace['api'] = api
     
     try:
-        exec(code_obj, sandbox_globals, exec_namespace)
+        exec(code_obj, exec_namespace)
         print(exec_namespace.get('response', '<h1>Application Error</h1>'))
     except Exception as e:
         print(f"<h1>Application Execution Error: {e}</h1>")
@@ -33598,6 +33616,69 @@ EOF_PY
     temp_dir=$(mktemp -d)
     cp "$runner_template" "${temp_dir}/runner.py"
     cp "$cached_source" "${temp_dir}/source.py"
+
+    python3 - "${temp_dir}/node_context.json" "${BLOCKCHAIN_DB:-${CORIUM_BLOCKCHAIN_DB:-}}" "${FORUM_DB:-${CORIUM_FORUM_DB:-}}" "${DHT_DB:-${CORIUM_DHT_DB:-}}" <<'PY_CTX' 2>/dev/null || true
+import sys, json, sqlite3, os
+
+out_path = sys.argv[1]
+chain_db = sys.argv[2] if len(sys.argv) > 2 else ''
+forum_db = sys.argv[3] if len(sys.argv) > 3 else ''
+dht_db = sys.argv[4] if len(sys.argv) > 4 else ''
+
+ctx = {
+    'blockchain': {'height': 0, 'blocks': [], 'tx_count': 0, 'block_count': 0},
+    'nns': [],
+    'dht': {'nodes_count': 0, 'chunks_count': 0, 'nodes': []}
+}
+
+if chain_db and os.path.exists(chain_db):
+    try:
+        conn = sqlite3.connect(f'file:{chain_db}?mode=ro', uri=True, timeout=1.0)
+        c = conn.cursor()
+        c.execute('SELECT count(*) FROM blocks')
+        ctx['blockchain']['block_count'] = c.fetchone()[0]
+        c.execute('SELECT count(*) FROM transactions')
+        ctx['blockchain']['tx_count'] = c.fetchone()[0]
+        c.execute('SELECT height, hash, previous_hash, timestamp, validator FROM blocks ORDER BY height DESC LIMIT 10')
+        blocks = []
+        for r in c.fetchall():
+            blocks.append({
+                'height': r[0], 'hash': r[1], 'previous_hash': r[2], 'timestamp': r[3], 'validator': r[4]
+            })
+        ctx['blockchain']['blocks'] = blocks
+        if blocks:
+            ctx['blockchain']['height'] = blocks[0]['height']
+        conn.close()
+    except Exception:
+        pass
+
+if forum_db and os.path.exists(forum_db):
+    try:
+        conn = sqlite3.connect(f'file:{forum_db}?mode=ro', uri=True, timeout=1.0)
+        c = conn.cursor()
+        c.execute('SELECT domain_name, target_hash, owner_id FROM nns_records LIMIT 50')
+        ctx['nns'] = [{'domain': r[0], 'target': r[1], 'owner': r[2]} for r in c.fetchall()]
+        conn.close()
+    except Exception:
+        pass
+
+if dht_db and os.path.exists(dht_db):
+    try:
+        conn = sqlite3.connect(f'file:{dht_db}?mode=ro', uri=True, timeout=1.0)
+        c = conn.cursor()
+        c.execute('SELECT count(*) FROM nodes')
+        ctx['dht']['nodes_count'] = c.fetchone()[0]
+        c.execute('SELECT count(*) FROM local_chunks')
+        ctx['dht']['chunks_count'] = c.fetchone()[0]
+        c.execute('SELECT id, address, port, trust_tier FROM nodes LIMIT 10')
+        ctx['dht']['nodes'] = [{'id': r[0], 'address': f'{r[1]}:{r[2]}', 'tier': r[3]} for r in c.fetchall()]
+        conn.close()
+    except Exception:
+        pass
+
+with open(out_path, 'w', encoding='utf-8') as f:
+    json.dump(ctx, f)
+PY_CTX
 
     local dapp_vault_dir="${DAPP_DATA_DIR:-${VAR_LIB_CORIUM_DIR:-/tmp}/dapp_data}/${app_id//[^a-zA-Z0-9_.-]/_}"
     mkdir -p "$dapp_vault_dir"
