@@ -1,4 +1,14 @@
 #!/bin/bash
+# Native default gateway entry; optional Ziokt checkout supplies the portal assets.
+if [[ "${BASH_SOURCE[0]}" -ef "$0" && "${1:-}" == gateway ]]; then
+    shift
+    if [[ "${1:-}" == init ]]; then shift; set -- bootstrap "$@"; fi
+    _ziokt_gateway_root="${ZIOKT_SOURCE_ROOT:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../Ziokt}"
+    if [[ -d "$_ziokt_gateway_root/ziokt" ]]; then
+        export PYTHONPATH="$_ziokt_gateway_root${PYTHONPATH:+:$PYTHONPATH}"
+    fi
+    exec python3 -m ziokt gateway "$@"
+fi
 # Corium
 # Project Codename: Project Chimera
 #
@@ -21401,35 +21411,37 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
             try:
                 filename,offset,size=row
                 if type(offset) is not int or type(size) is not int or offset<0 or size<0: raise ValueError('Invalid object range')
-                with tempfile.NamedTemporaryFile() as staged:
-                    with open(filename,'rb') as source:
-                        if offset+size>os.fstat(source.fileno()).st_size: raise ValueError('Truncated local object')
-                        source.seek(offset);remaining=size
-                        while remaining:
-                            data=source.read(min(65536,remaining))
-                            if not data: raise ValueError('Truncated local object')
-                            staged.write(data);remaining-=len(data)
-                    staged.flush()
-                    if not verify_object_file(staged.name,digest,BLOCKCHAIN_DB_PATH): raise ValueError('Corrupted local object')
+                with open(filename,'rb') as source:
+                    if offset+size>os.fstat(source.fileno()).st_size: raise ValueError('Truncated local object')
+                    source.seek(offset);remaining=size;hasher=hashlib.sha256()
+                    while remaining:
+                        data=source.read(min(65536,remaining))
+                        if not data: raise ValueError('Truncated local object')
+                        hasher.update(data);remaining-=len(data)
+                    if hasher.hexdigest()!=digest:
+                        if size>2097152 or offset!=0 or size!=os.fstat(source.fileno()).st_size or not verify_object_file(filename,digest,BLOCKCHAIN_DB_PATH):
+                            raise ValueError('Corrupted local object')
                     start,end=0,size-1;range_header=self.headers.get('Range')
                     if range_header:
-                        match=re.fullmatch(r'bytes=([0-9]*)-([0-9]*)',range_header)
-                        if not match or not any(match.groups()): self.send_error(416,'Invalid range'); return
+                        match=re.fullmatch(r'bytes=([0-9]{0,20})-([0-9]{0,20})',range_header)
+                        if not match or not any(match.groups()): self.send_response(416);self.send_header('Content-Range',f'bytes */{size}');self.send_header('Content-Length','0');self.end_headers();return
                         left,right=match.groups()
                         if left:
                             start=int(left);end=min(int(right),size-1) if right else size-1
                         else:
                             count=int(right);start=max(0,size-count)
-                            if count==0: self.send_error(416,'Invalid range'); return
-                        if start>=size or start>end: self.send_error(416,'Unsatisfiable range'); return
+                            if count==0: self.send_response(416);self.send_header('Content-Range',f'bytes */{size}');self.send_header('Content-Length','0');self.end_headers();return
+                        if start>=size or start>end: self.send_response(416);self.send_header('Content-Range',f'bytes */{size}');self.send_header('Content-Length','0');self.end_headers();return
                     self.send_response(206 if range_header else 200)
                     self.send_header('Content-Type','application/octet-stream')
                     self.send_header('Accept-Ranges','bytes')
                     self.send_header('Content-Length',str(max(0,end-start+1)))
                     if range_header: self.send_header('Content-Range',f'bytes {start}-{end}/{size}')
-                    self.end_headers();staged.seek(start);remaining=max(0,end-start+1)
+                    self.end_headers();source.seek(offset+start);remaining=max(0,end-start+1)
                     while remaining:
-                        data=staged.read(min(65536,remaining));self.wfile.write(data);remaining-=len(data)
+                        data=source.read(min(65536,remaining))
+                        if not data: raise ValueError('Truncated object')
+                        self.wfile.write(data);remaining-=len(data)
             except (BrokenPipeError,ConnectionResetError): return
             except Exception as exc:
                 bilingual_print(f'Object retrieval failed: {exc}',f'对象读取失败: {exc}','ERROR')
@@ -21510,6 +21522,9 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         处理对 DApp 的请求。它现在作为一个分发器，将请求路由到
         内置的 RestrictedPython 引擎或一个自定义的 dapp_engine 模组。
         """
+        if any(key in query_params for key in ('topic', 'reply_to', 'content')) and (domain_name == 'forum' or 'forum' in path_parts):
+            self.send_error(405, "Forum writes require POST /api/gateway/forum and explicit authentication")
+            return
         # --- 步骤 1: 获取 DApp 清单 / Step 1: Fetch the DApp Manifest ---
         root_hash = self._resolve_nns(domain_name)
         if not root_hash:
@@ -21558,7 +21573,13 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
         try:
             # We call our new bash internal command that runs bwrap
             import subprocess
-            req_data = {'path': path_parts, 'query': query_params, 'app_id': domain_name}
+            import http.cookies
+            cookie=http.cookies.SimpleCookie()
+            try: cookie.load(self.headers.get('Cookie',''))
+            except http.cookies.CookieError: pass
+            preference=query_params.get('lang',[None])[0] or (cookie['ziokt_lang'].value if 'ziokt_lang' in cookie else None) or self.headers.get('Accept-Language','en-US').split(',')[0].split(';')[0]
+            locale='zh-CN' if preference.lower().startswith('zh') else 'en-US'
+            req_data = {'path': path_parts, 'query': query_params, 'app_id': domain_name, 'locale':locale}
             result = subprocess.run(
                 [SCRIPT_PATH, '--quiet', '_internal_run_dapp_sandboxed', app_hash, json.dumps(req_data), domain_name],
                 capture_output=True, text=True, timeout=10
@@ -23256,6 +23277,14 @@ PY_ENGINE_ZERO
                      reorg_cache["$tx_hash"]="invalid"; return 1
                 fi
             fi
+            ;;
+        "nns_update")
+            jq -e 'keys==["records"] and (.records|type=="array" and length>0 and length<=32 and all(.[]; keys==["domain_name","target_hash"] and (.domain_name|type=="string" and test("^[a-z0-9-]{1,63}$")) and (.target_hash|type=="string" and test("^[a-f0-9]{64}$"))))' <<< "$tx_payload" >/dev/null || return 1
+            local nns_record nns_owner
+            while IFS= read -r nns_record; do
+                nns_owner=$(db_query_safe "$FORUM_DB" "SELECT owner_id FROM nns_records WHERE domain_name = %s;" "$(jq -r .domain_name <<< "$nns_record")")
+                [ "$nns_owner" = "$sender_id" ] || return 1
+            done < <(jq -c '.records[]' <<< "$tx_payload")
             ;;
         "nns_transfer")
             local domain_name current_owner current_height
@@ -26529,20 +26558,40 @@ PY_FORUM_VALIDATE
         manifest_signed=$(cat "$manifest_path") || return 1
         author=$(jq -er '.author' <<< "$manifest_signed") || return 1
         signature=$(jq -er '.signature' <<< "$manifest_signed") || return 1
-        pubkey_path=$(_forum_get_author_pubkey "$author") || { failed=1; continue; }
-        [ -f "$pubkey_path" ] || { failed=1; continue; }
-        manifest_unsigned=$(jq 'del(.signature)' <<< "$manifest_signed") || { failed=1; continue; }
-        if ! verify_signature "$manifest_unsigned" "$signature" "$pubkey_path"; then
-            # Preserve the original v108 post writer's whitespace-bound signatures.
-            legacy=$("${PYTHON_CMD}" - "$manifest_path" <<'PY_FORUM_LEGACY'
+        if [ "$(jq -r '.version' <<< "$manifest_signed")" = '3.0' ]; then
+            "${PYTHON_CMD}" - "$manifest_path" "${CORIUM_NETWORK_ID_OVERRIDE:-${CORIUM_NETWORK_ID:-default}}" "$item_type" <<'PY_FORUM_V3'
+import hashlib,json,sys
+from pathlib import Path
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+m=json.loads(Path(sys.argv[1]).read_text())
+keys={'schema','network','title','content','reply_to','timestamp','nonce','public_key'}
+u={k:m[k] for k in keys}
+assert u['schema']=='ziokt.forum.v3' and u['network']==sys.argv[2]
+assert isinstance(u['title'],str) and len(u['title'].encode())<=256
+assert isinstance(u['content'],str) and 0<len(u['content'].encode())<=65536
+assert m['author']==hashlib.sha256(bytes.fromhex(u['public_key'])).hexdigest()
+assert m['content_hash']==hashlib.sha256(u['content'].encode()).hexdigest()
+assert not m.get('attachment_hash') and not m.get('attachment_name') and not m.get('associated_group_id')
+assert (sys.argv[3]=='post' and m['topic_id']==u['reply_to']) or (sys.argv[3]=='topic' and not u['reply_to'] and u['title'].strip())
+Ed25519PublicKey.from_public_bytes(bytes.fromhex(u['public_key'])).verify(bytes.fromhex(m['signature']),json.dumps(u,sort_keys=True,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode())
+PY_FORUM_V3
+            [ "$?" -eq 0 ] || { failed=1; continue; }
+        else
+            pubkey_path=$(_forum_get_author_pubkey "$author") || { failed=1; continue; }
+            [ -f "$pubkey_path" ] || { failed=1; continue; }
+            manifest_unsigned=$(jq 'del(.signature)' <<< "$manifest_signed") || { failed=1; continue; }
+            if ! verify_signature "$manifest_unsigned" "$signature" "$pubkey_path"; then
+                # Preserve the original v108 post writer's whitespace-bound signatures.
+                legacy=$("${PYTHON_CMD}" - "$manifest_path" <<'PY_FORUM_LEGACY'
 import json,re,sys,pathlib
 raw=pathlib.Path(sys.argv[1]).read_text().rstrip('\n');m=json.loads(raw)
 old=re.sub(r', "signature": "[a-f0-9]+"\n}\Z','}',raw)
 assert old!=raw and json.loads(old)=={k:v for k,v in m.items() if k!='signature'}
 print(old,end='')
 PY_FORUM_LEGACY
-            ) || { failed=1; continue; }
-            verify_signature "$legacy" "$signature" "$pubkey_path" || { failed=1; continue; }
+                ) || { failed=1; continue; }
+                verify_signature "$legacy" "$signature" "$pubkey_path" || { failed=1; continue; }
+            fi
         fi
         content_hash=$(jq -er '.content_hash' <<< "$manifest_signed") || return 1
         attachment_hash=$(jq -r '.attachment_hash // ""' <<< "$manifest_signed") || return 1
@@ -33617,25 +33666,8 @@ EOF_PY
     cp "$runner_template" "${temp_dir}/runner.py"
     cp "$cached_source" "${temp_dir}/source.py"
 
-    # Handle real forum submission from DApp query if provided
-    if [ -n "$query_params_json" ] && [ -n "${FORUM_DB:-${CORIUM_FORUM_DB:-}}" ]; then
-        local _f_topic _f_reply _f_content
-        _f_topic=$(python3 -c 'import sys, json; q=json.loads(sys.argv[1]).get("query", {}) if sys.argv[1] else {}; print(q.get("topic", [""])[0].strip())' "$query_params_json" 2>/dev/null || true)
-        _f_reply=$(python3 -c 'import sys, json; q=json.loads(sys.argv[1]).get("query", {}) if sys.argv[1] else {}; print(q.get("reply_to", [""])[0].strip())' "$query_params_json" 2>/dev/null || true)
-        _f_content=$(python3 -c 'import sys, json; q=json.loads(sys.argv[1]).get("query", {}) if sys.argv[1] else {}; print(q.get("content", [""])[0].strip())' "$query_params_json" 2>/dev/null || true)
-        
-        if [ -n "$_f_content" ]; then
-            if [ -n "$_f_reply" ]; then
-                acquire_lock "network" 2>/dev/null || true
-                forum_create_post "$_f_reply" "$_f_content" "" 2>/dev/null || true
-                release_lock "network" 2>/dev/null || true
-            elif [ -n "$_f_topic" ]; then
-                acquire_lock "network" 2>/dev/null || true
-                forum_create_topic "$_f_topic" "$_f_content" "" "" 2>/dev/null || true
-                release_lock "network" 2>/dev/null || true
-            fi
-        fi
-    fi
+    # HTTP rendering is read-only. Client-signed or administrator writes enter
+    # through the authenticated native gateway API, never through query params.
 
     python3 - "${temp_dir}/node_context.json" "${BLOCKCHAIN_DB:-${CORIUM_BLOCKCHAIN_DB:-}}" "${FORUM_DB:-${CORIUM_FORUM_DB:-}}" "${DHT_DB:-${CORIUM_DHT_DB:-}}" <<'PY_CTX' 2>/dev/null || true
 import sys, json, sqlite3, os
@@ -37381,6 +37413,12 @@ _update_chain_state_cache() {
                         local target_node_id=$(echo "$decoded_probe" | jq -r .node_id); local latency=$(echo "$decoded_probe" | jq -r .latency_ms)
                         db_execute_safe "$DHT_DB" "INSERT OR REPLACE INTO network_latency_map (source_node_id, target_node_id, latency_ms, last_updated_block) VALUES (%s, %s, %d, %d);" "$sender_id" "$target_node_id" "$latency" "$height"
                     done
+                    ;;
+                "nns_update")
+                    local nns_record
+                    while IFS= read -r nns_record; do
+                        db_execute_safe "$FORUM_DB" "UPDATE nns_records SET target_hash=%s,last_update_height=%d WHERE domain_name=%s AND owner_id=%s;" "$(jq -r .target_hash <<< "$nns_record")" "$height" "$(jq -r .domain_name <<< "$nns_record")" "$sender_id" || return 1
+                    done < <(jq -c '.records[]' <<< "$tx_payload")
                     ;;
                 "nns_transfer")
                     local domain_name new_owner tax_json

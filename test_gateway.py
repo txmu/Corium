@@ -219,6 +219,35 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.rpc('STORE',digest+' '+self.identity,wrong)['status'],'error')
         with sqlite3.connect(self.dht) as db:self.assertEqual(json.loads(db.execute('SELECT nodes FROM chunks WHERE hash=?',(digest,)).fetchone()[0]),[self.identity])
 
+    def test_http_forum_query_write_is_rejected_before_execution(self):
+        import http.client
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),self.ns['CoriumGatewayHandler'])
+        self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+        conn.request('GET','/app/forum?topic=forged&content=forged')
+        response=conn.getresponse();self.assertEqual(response.status,405);response.read();conn.close()
+        with sqlite3.connect(self.forum) as db:
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='topics'").fetchone())
+
+    def test_http_chunk_range_without_temporary_download_file(self):
+        import http.client
+        from unittest.mock import patch
+        data=b'native object range'*1024;digest=hashlib.sha256(data).hexdigest()
+        path=self.root/'object';path.write_bytes(data)
+        with sqlite3.connect(self.dht) as db:db.execute('INSERT INTO local_chunks(hash,file_path,offset,size) VALUES (?,?,0,?)',(digest,str(path),len(data)))
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),self.ns['CoriumGatewayHandler'])
+        self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        with patch('tempfile.NamedTemporaryFile',side_effect=AssertionError('download must not stage a file')):
+            conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+            conn.request('GET','/chunk/'+digest,headers={'Range':'bytes=10-42'});response=conn.getresponse()
+            self.assertEqual(response.status,206);self.assertEqual(response.read(),data[10:43]);conn.close()
+            conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+            conn.request('GET','/chunk/'+digest,headers={'Range':'bytes=999999-'});response=conn.getresponse()
+            self.assertEqual(response.status,416);self.assertEqual(response.getheader('Content-Range'),'bytes */'+str(len(data)));response.read();conn.close()
+
+
 class StunDiscoveryTests(unittest.TestCase):
     def test_binding_xor_address_and_transaction_binding_over_udp(self):
         import socket, struct

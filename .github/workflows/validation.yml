@@ -47,7 +47,7 @@ jobs:
           python -m unittest -v test_ci_integration 2>&1 | tee ci-logs/integration.log
       - name: Native Ziokt opt-in contract
         if: ${{ !cancelled() }}
-        run: python -m unittest -v test_ziokt
+        run: python -m unittest -v test_ziokt test_gateway test_forum_v3
       - name: Native ZKT reputation system
         if: ${{ !cancelled() }}
         run: python -m unittest -v test_zkt
