@@ -27169,7 +27169,7 @@ corix_forum() {
                 local temp_manifest; temp_manifest=$(mktemp)
                 CORIUM_TEMP_ITEMS+=("$temp_manifest")
                 if _p2p_download_object "$topic_id" "$temp_manifest"; then
-                    associated_group_id=$(jq -r .associated_group_id "$temp_manifest" // "NULL")
+                    associated_group_id=$(jq -r '.associated_group_id // "NULL"' "$temp_manifest")
                 fi
             fi
             
@@ -33617,6 +33617,26 @@ EOF_PY
     cp "$runner_template" "${temp_dir}/runner.py"
     cp "$cached_source" "${temp_dir}/source.py"
 
+    # Handle real forum submission from DApp query if provided
+    if [ -n "$query_params_json" ] && [ -n "${FORUM_DB:-${CORIUM_FORUM_DB:-}}" ]; then
+        local _f_topic _f_reply _f_content
+        _f_topic=$(python3 -c 'import sys, json; q=json.loads(sys.argv[1]).get("query", {}) if sys.argv[1] else {}; print(q.get("topic", [""])[0].strip())' "$query_params_json" 2>/dev/null || true)
+        _f_reply=$(python3 -c 'import sys, json; q=json.loads(sys.argv[1]).get("query", {}) if sys.argv[1] else {}; print(q.get("reply_to", [""])[0].strip())' "$query_params_json" 2>/dev/null || true)
+        _f_content=$(python3 -c 'import sys, json; q=json.loads(sys.argv[1]).get("query", {}) if sys.argv[1] else {}; print(q.get("content", [""])[0].strip())' "$query_params_json" 2>/dev/null || true)
+        
+        if [ -n "$_f_content" ]; then
+            if [ -n "$_f_reply" ]; then
+                acquire_lock "network" 2>/dev/null || true
+                forum_create_post "$_f_reply" "$_f_content" "" 2>/dev/null || true
+                release_lock "network" 2>/dev/null || true
+            elif [ -n "$_f_topic" ]; then
+                acquire_lock "network" 2>/dev/null || true
+                forum_create_topic "$_f_topic" "$_f_content" "" "" 2>/dev/null || true
+                release_lock "network" 2>/dev/null || true
+            fi
+        fi
+    fi
+
     python3 - "${temp_dir}/node_context.json" "${BLOCKCHAIN_DB:-${CORIUM_BLOCKCHAIN_DB:-}}" "${FORUM_DB:-${CORIUM_FORUM_DB:-}}" "${DHT_DB:-${CORIUM_DHT_DB:-}}" <<'PY_CTX' 2>/dev/null || true
 import sys, json, sqlite3, os
 
@@ -33628,7 +33648,8 @@ dht_db = sys.argv[4] if len(sys.argv) > 4 else ''
 ctx = {
     'blockchain': {'height': 0, 'blocks': [], 'tx_count': 0, 'block_count': 0},
     'nns': [],
-    'dht': {'nodes_count': 0, 'chunks_count': 0, 'nodes': []}
+    'dht': {'nodes_count': 0, 'chunks_count': 0, 'nodes': []},
+    'forum': {'topics': []}
 }
 
 if chain_db and os.path.exists(chain_db):
@@ -33654,10 +33675,57 @@ if chain_db and os.path.exists(chain_db):
 
 if forum_db and os.path.exists(forum_db):
     try:
-        conn = sqlite3.connect(f'file:{forum_db}?mode=ro', uri=True, timeout=1.0)
+        conn = sqlite3.connect(f'file:{forum_db}?mode=ro', uri=True, timeout=2.0)
         c = conn.cursor()
         c.execute('SELECT domain_name, target_hash, owner_id FROM nns_records LIMIT 50')
         ctx['nns'] = [{'domain': r[0], 'target': r[1], 'owner': r[2]} for r in c.fetchall()]
+
+        obj_dirs = [
+            os.path.join(os.path.dirname(forum_db), 'objects'),
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(forum_db))), 'p2p', 'objects')
+        ]
+        def _read_content(h):
+            if not h: return ""
+            for od in obj_dirs:
+                op = os.path.join(od, h)
+                if os.path.isfile(op):
+                    try:
+                        with open(op, 'r', encoding='utf-8', errors='replace') as of:
+                            return of.read()
+                    except Exception:
+                        pass
+            return ""
+
+        c.execute('SELECT id, title, author, timestamp, content_hash FROM topics ORDER BY timestamp DESC LIMIT 50')
+        topics_rows = c.fetchall()
+        topics_list = []
+        for trow in topics_rows:
+            tid, ttitle, tauthor, ttime, tchash = trow
+            tcontent = _read_content(tchash)
+            c2 = conn.cursor()
+            c2.execute('SELECT id, author, timestamp, content_hash FROM posts WHERE topic_id=? ORDER BY timestamp ASC', (tid,))
+            replies_list = []
+            for prow in c2.fetchall():
+                pid, pauthor, ptime, pchash = prow
+                pcontent = _read_content(pchash)
+                replies_list.append({
+                    'id': pid,
+                    'author': pauthor,
+                    'timestamp': ptime,
+                    'content': pcontent,
+                    'content_hash': pchash
+                })
+            c2.close()
+            topics_list.append({
+                'id': tid,
+                'topic': ttitle,
+                'author': tauthor,
+                'timestamp': ttime,
+                'content_hash': tchash,
+                'content': tcontent,
+                'replies': replies_list
+            })
+        ctx['forum'] = {'topics': topics_list}
         conn.close()
     except Exception:
         pass
