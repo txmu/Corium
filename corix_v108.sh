@@ -23105,7 +23105,9 @@ PY_ENGINE_ZERO
             
             # 验证 2: 验证载荷中哈希值的格式是否正确 (64位十六进制字符)
             # Verification 2: Validate the format of hashes in the payload (64 hex characters)
-            local compute_hash verifier_hash
+            local compute_hash verifier_hash pkg_id
+            pkg_id=$(jq -r .pkg_id <<< "$tx_payload")
+            jq -e '(.reward_weight // 100) | type=="number" and floor==. and .>=1 and .<=1000000' <<< "$tx_payload" >/dev/null || return 1
             compute_hash=$(echo "$tx_payload" | jq -r .compute_program_hash 2>/dev/null)
             verifier_hash=$(echo "$tx_payload" | jq -r .verifier_script_hash 2>/dev/null)
             if [[ -z "$pkg_id" || "$pkg_id" == "null" ]]; then
@@ -24002,6 +24004,12 @@ _protocol_execute_scheduled_changes() {
                 db_execute_safe "$BLOCKCHAIN_DB" \
                     "INSERT OR REPLACE INTO active_app_templates (template_name, pkg_id, package_hash, manifest_hash, developer_signature, developer_id, schema_version, handles_tx_types, activation_height) VALUES (%s, %s, %s, %s, %s, %s, %d, %s, %d);" \
                     "$name" "$pkg_id" "$package_hash" "$manifest_hash" "$dev_sig" "$developer_id" "$schema_version" "$handles_tx_types" "$current_block_height"
+                ;;
+
+            "propose_new_compute_engine")
+                local engine_weight
+                engine_weight=$(jq -er '(.reward_weight // 100) | select(type=="number" and floor==. and .>=1 and .<=1000000)' <<< "$change_data") || return 1
+                db_execute_safe "$BLOCKCHAIN_DB" "UPDATE compute_engines SET is_active=1,reward_weight=%d WHERE engine_id=%s;" "$engine_weight" "$proposal_hash" || return 1
                 ;;
 
             "propose_ibc_verifier")
@@ -37309,7 +37317,9 @@ _update_chain_state_cache() {
                     pkg_id=$(echo "$tx_payload" | jq -r .pkg_id)
                     compute_hash=$(echo "$tx_payload" | jq -r .compute_program_hash)
                     verifier_hash=$(echo "$tx_payload" | jq -r .verifier_script_hash)
-                    db_execute_safe "$BLOCKCHAIN_DB" "INSERT INTO compute_engines (engine_id, pkg_id, description, compute_program_hash, verifier_script_hash, is_active) VALUES (%s, %s, %s, %s, %s, 0);" "$tx_hash" "$pkg_id" "$description" "$compute_hash" "$verifier_hash"
+                    local engine_reward_weight
+                    engine_reward_weight=$(jq -er '.reward_weight // 100' <<< "$tx_payload") || return 1
+                    db_execute_safe "$BLOCKCHAIN_DB" "INSERT INTO compute_engines (engine_id, pkg_id, description, compute_program_hash, verifier_script_hash, is_active, reward_weight) VALUES (%s, %s, %s, %s, %s, 0, %d);" "$tx_hash" "$pkg_id" "$description" "$compute_hash" "$verifier_hash" "$engine_reward_weight"
                     ;;
                 "set_nickname")
                     local nickname=$(echo "$tx_payload" | jq -r .nickname)
