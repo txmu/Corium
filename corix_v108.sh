@@ -26024,6 +26024,15 @@ PY_ENGINE_ZERO
                 warn "      ! NNS 错误: '${domain_name}' 的域名格式无效。/ ! NNS Error: Invalid domain name format for '${domain_name}'."
                 reorg_cache["$tx_hash"]="invalid"; return 1
             fi
+            # Registration cannot overwrite another NNS owner's existing root,
+            # including genesis reservations. Expired roots use native auction
+            # governance rather than an unauthenticated registration overwrite.
+            local registered_owner registration_slot
+            registered_owner=$(db_query_safe "$FORUM_DB" "SELECT owner_id FROM nns_records WHERE domain_name=%s;" "$domain_name") || return 1
+            [ -z "$registered_owner" ] || [ "$registered_owner" = "$sender_id" ] || return 1
+            registration_slot="nns-register:$domain_name"
+            [ -z "${intra_block_state_tracker[$registration_slot]:-}" ] || return 1
+            intra_block_state_tracker["$registration_slot"]=1
             current_height="$block_height"
             if [ "$current_height" -le 5000 ]; then
                 if ! echo "$tx_payload" | jq -e '.proof_of_genesis_contribution' >/dev/null; then

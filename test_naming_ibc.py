@@ -22,6 +22,14 @@ class NamingIBCTests(Fixture):
         for change in ({'root':'not-owned'},{'source_chain_id':'wrong'},{'expires_at':1},{'epoch':0}):
             payload=self.payload();payload['message_payload'].update(change)
             self.validate(self.transaction(payload),False)
+    def test_registration_cannot_overwrite_another_owner(self):
+        with sqlite3.connect(self.forum) as db:db.execute("UPDATE nns_records SET owner_id=? WHERE domain_name='corium'",('f'*64,))
+        payload={'domain_name':'corium','target_hash':'a'*64,'proof_of_genesis_contribution':{'probes':[]}}
+        timestamp=int(time.time());data=json.dumps(payload,separators=(',',':'))
+        raw='{"type":"nns_register","data":'+data+',"timestamp":'+str(timestamp)+'}';digest=hashlib.sha256(raw.encode()).hexdigest()
+        with sqlite3.connect(self.chain) as db:db.execute('INSERT INTO transactions VALUES (?,?,?,?,?,?,NULL)',(digest,'nns_register',data,self.sign(raw),self.pem,timestamp))
+        self.validate(digest,False)
+
     def test_mine_checkpoint_proof_and_epoch_replay(self):
         payload=self.payload();tx=self.transaction(payload)
         self.run_core('blockchain_mine_block')
