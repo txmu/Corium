@@ -10,8 +10,9 @@ class Fixture(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(prefix='corium-core.');self.addCleanup(self.tmp.cleanup)
         self.root=pathlib.Path(self.tmp.name)
-        self.env=dict(os.environ,CORIUM_ROOT=str(self.root),CORIUM_NETWORK_ID_OVERRIDE='default',CORIUM_TEST_NO_DAEMONS='1')
-        self.base=self.root/'var/lib/corix/networks/default';self.etc=self.root/'etc/corix/networks/default'
+        network=getattr(self,'network_id','default')
+        self.env=dict(os.environ,CORIUM_ROOT=str(self.root),CORIUM_NETWORK_ID_OVERRIDE=network,CORIUM_TEST_NO_DAEMONS='1')
+        self.base=self.root/'var/lib/corix/networks'/network;self.etc=self.root/'etc/corix/networks'/network
         self.etc.mkdir(parents=True)
         self.chain=self.base/'blockchain/chain.db';self.forum=self.base/'forum/forum.db';self.dht=self.root/'var/lib/corix/p2p/dht.db'
         for path,name in [(self.chain,'_init_blockchain_db'),(self.forum,'_init_app_db'),(self.dht,'_init_dht_db')]:
