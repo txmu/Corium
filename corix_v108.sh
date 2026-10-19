@@ -143,7 +143,7 @@ MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
-           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes")
+           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
 class ProtocolError(ValueError):
@@ -566,7 +566,7 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -812,7 +812,7 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
-        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
                 with closing(corium_db(root,network,'blockchain/chain.db')) as db:result=zs_query(db,network,method,request['params'])
@@ -1899,6 +1899,17 @@ ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
 _ZS_ZERO = bytes(32)
 _ZS_ORDER = 2**252 + 27742317777372353535851937790883648493
 _ZS_LIB = None
+_ZS_OPS = {
+    'crypto_core_ristretto255_from_hash': ((64,), True),
+    'crypto_core_ristretto255_scalar_reduce': ((64,), False),
+    'crypto_scalarmult_ristretto255': ((32, 32), True),
+    'crypto_scalarmult_ristretto255_base': ((32,), True),
+    'crypto_core_ristretto255_add': ((32, 32), True),
+    'crypto_core_ristretto255_sub': ((32, 32), True),
+    'crypto_core_ristretto255_scalar_mul': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_add': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_sub': ((32, 32), False),
+}
 
 
 def zs_json(value):
@@ -1937,24 +1948,31 @@ def zs_lib():
             try:lib=_zs_ct.CDLL(name);break
             except OSError:continue
         if lib is None:raise ValueError('libsodium Ristretto255 unavailable')
+        lib.sodium_init.argtypes = []
+        lib.sodium_init.restype = _zs_ct.c_int
         if lib.sodium_init() < 0: raise ValueError('libsodium initialization failed')
-        for function in ('crypto_core_ristretto255_is_valid_point', 'crypto_core_ristretto255_from_hash',
-                         'crypto_core_ristretto255_scalar_reduce', 'crypto_scalarmult_ristretto255',
-                         'crypto_scalarmult_ristretto255_base', 'crypto_core_ristretto255_add',
-                         'crypto_core_ristretto255_sub', 'crypto_core_ristretto255_scalar_mul',
-                         'crypto_core_ristretto255_scalar_add', 'crypto_core_ristretto255_scalar_sub'):
-            getattr(lib, function).restype = _zs_ct.c_int
+        for function, (sizes, status) in _ZS_OPS.items():
+            fn = getattr(lib, function)
+            fn.argtypes = [_zs_ct.c_void_p] * (len(sizes) + 1)
+            fn.restype = _zs_ct.c_int if status else None
+        lib.crypto_core_ristretto255_is_valid_point.argtypes = [_zs_ct.c_void_p]
+        lib.crypto_core_ristretto255_is_valid_point.restype = _zs_ct.c_int
         _ZS_LIB = lib
     return _ZS_LIB
 
 
 def zs_op(name, *values):
+    contract = _ZS_OPS.get(name)
+    if contract is None or len(values) != len(contract[0]) or any(type(v) is not bytes or len(v) != size for v, size in zip(values, contract[0])):
+        raise ValueError('Ristretto exact operation and buffer sizes required')
+    if '_scalar_' in name and not name.endswith('_reduce'):
+        for value in values: zs_scalar(value)
+    elif name.startswith('crypto_scalarmult_'):
+        zs_scalar(values[0])
     output = _zs_ct.create_string_buffer(32)
     fn = getattr(zs_lib(), name)
-    # Scalar operations/from_hash return void; only point operations have status.
     status = fn(output, *(_zs_ct.create_string_buffer(v, len(v)) for v in values))
-    if name in {'crypto_scalarmult_ristretto255', 'crypto_scalarmult_ristretto255_base',
-                'crypto_core_ristretto255_add', 'crypto_core_ristretto255_sub'} and status != 0:
+    if contract[1] and status != 0:
         raise ValueError('Ristretto operation rejected')
     return output.raw
 
@@ -1974,7 +1992,11 @@ def zs_point(value):
 
 
 def zs_reduce(raw): return zs_op('crypto_core_ristretto255_scalar_reduce', raw)
-def zs_random_scalar(): return zs_reduce(_zs_random.token_bytes(64))
+def zs_random_scalar():
+    for _ in range(8):
+        value = zs_reduce(_zs_random.token_bytes(64))
+        if value != _ZS_ZERO: return value
+    raise ValueError('nonzero scalar randomness unavailable')
 def zs_sadd(a, b): return zs_op('crypto_core_ristretto255_scalar_add', a, b)
 def zs_ssub(a, b): return zs_op('crypto_core_ristretto255_scalar_sub', a, b)
 def zs_smul(a, b): return zs_op('crypto_core_ristretto255_scalar_mul', a, b)
@@ -2090,6 +2112,8 @@ def zs_validate(db, network, kind, value, sender):
         else:
             if type(value['ring']) is not list or len(value['ring']) not in (16, 32, 64) or len(set(value['ring'])) != len(value['ring']) or value['ring'] != sorted(value['ring']): raise ValueError('unique canonical fixed ring required')
             zs_hex(value['anchor'])
+            if not zs_exists(db, 'zkn_shield_notes') or not zs_exists(db, 'zkn_shield_images'):
+                raise ValueError('shielded pool not initialized')
             anchor = db.execute('SELECT height FROM blocks WHERE hash=?', (value['anchor'],)).fetchone()
             if not anchor or not 1 <= zs_height(db)-anchor[0] <= 128: raise ValueError('mature canonical anchor required')
             ring = []
@@ -2120,6 +2144,9 @@ def zs_validate(db, network, kind, value, sender):
         if zs_exists(db, 'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0] >= 8: raise ValueError('review request quota')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT 1 FROM privacy_requests WHERE requester=? AND nonce=?',(sender,value['nonce'])).fetchone(): raise ValueError('review request replay')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0',(height,)).fetchone()[0]>=4096: raise ValueError('global review request quota')
+        electorate=db.execute("SELECT stake FROM validators WHERE status='active' AND stake>0 LIMIT 1025").fetchall()
+        if not 1 <= len(electorate) <= 1024 or any(type(weight) is not int or not 0 < weight < 2**53 for (weight,) in electorate):
+            raise ValueError('bounded active validator electorate required')
         return
     if value.get('network_id')!=network:raise ValueError('review network mismatch')
     fields = {'request_id', 'decision'} if kind == 'privacy_review_vote' else {'request_id'} if kind == 'privacy_review_revoke' else {'request_id', 'note_id', 'ciphertext', 'authorization'}
@@ -2217,6 +2244,9 @@ def zs_query(db, network, method, params):
     if method == 'zkn.shield.notes':
         rows=[] if not zs_exists(db,'zkn_shield_notes') else db.execute('SELECT note_id,public_key,commitment,ciphertext,height FROM zkn_shield_notes WHERE note_id>? ORDER BY note_id LIMIT ?',(cursor,limit+1)).fetchall()
         return {'notes':[dict(zip(('note_id','public_key','commitment','ciphertext','height'),r)) for r in rows[:limit]],'next_cursor':rows[limit-1][0] if len(rows)>limit else None,'spent_notes_identifiable':False}
+    if method == 'zkn.shield.images':
+        rows=[] if not zs_exists(db,'zkn_shield_images') else db.execute('SELECT image,height,transaction_hash FROM zkn_shield_images WHERE image>? ORDER BY image LIMIT ?', (cursor, limit+1)).fetchall()
+        return {'images':[dict(zip(('image','height','transaction_hash'),r)) for r in rows[:limit]], 'next_cursor':rows[limit-1][0] if len(rows)>limit else None, 'spent_notes_identifiable':False}
     raise ValueError('unknown privacy query')
 
 """Native signed registration receipts and transferable block-snapshot ZKN assets."""
@@ -2250,8 +2280,8 @@ def zkc_edition_id(payload):
 
 def asset_signed_gift(tx, network, kind='zkn_private_transfer'):
     if (not isinstance(tx,dict) or set(tx)!={'type','data','timestamp','public_key','signature'} or
-            kind not in ({'zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
-            not isinstance(tx['data'],dict) or tx['data'].get('network_id')!=network or
+            kind not in ({'zkn_transfer','zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
+            not isinstance(tx['data'],dict) or (kind != 'zkn_transfer' and tx['data'].get('network_id')!=network) or
             not isinstance(tx['public_key'],str) or len(tx['public_key'])>1024 or
             not isinstance(tx['signature'],str) or len(tx['signature'])>160):
         fail('INVALID_ZKN','scoped signed private gift transaction required')
@@ -2281,6 +2311,54 @@ def asset_writable_database(path):
     return sqlite3.connect(Path(path).absolute().as_uri()+'?mode=rw',uri=True,timeout=5)
 
 
+def asset_privacy_pending(db, network, kind, value, sender):
+    """Reserve privacy conflicts under the caller's BEGIN IMMEDIATE lock.
+
+    Admission policy only: consensus validation must not depend on local mempool
+    contents, whose order and membership differ between validators.
+    """
+    own_requests = global_requests = 0
+    ownership = {'zkn_shield_deposit', 'zkn_transfer', 'zkn_private_transfer'}
+    kinds = sorted(ZS_TYPES | {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'})
+    rows = db.execute('SELECT type,data,public_key FROM transactions WHERE block_height IS NULL AND type IN (' + ','.join('?' for _ in kinds) + ') LIMIT 4097', kinds)
+    for pending_kind, raw, public in rows:
+        pending = strict_json(raw.encode())
+        if type(pending) is not dict: fail('PRIVACY_CONFLICT', 'pending privacy payload requires native recovery')
+        if pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and type(pending.get('proof')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy proof requires native recovery')
+        if pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and type(pending.get('note')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy note requires native recovery')
+        same_sender = hashlib.sha256(public.rstrip('\n').encode()).hexdigest() == sender
+        if kind in ownership | {'zkc_issue'} and pending_kind in ownership | {'zkc_issue'} and (kind in ownership or pending_kind in ownership) and pending.get('token_id') == value['token_id']:
+            fail('PRIVACY_CONFLICT', 'asset already has a pending ownership change')
+        if kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending.get('proof', {}).get('image') == value['proof']['image']:
+            fail('PRIVACY_CONFLICT', 'nullifier already pending')
+        if kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'}:
+            note = pending.get('note', {})
+            if any(note.get(field) == value['note'][field] for field in ('public_key', 'commitment')):
+                fail('PRIVACY_CONFLICT', 'one-time note key or commitment already pending')
+        if pending_kind == 'privacy_review_request':
+            global_requests += 1
+            own_requests += int(same_sender)
+            if kind == 'privacy_review_request' and same_sender and pending.get('nonce') == value['nonce']:
+                fail('PRIVACY_CONFLICT', 'request nonce already pending')
+        if value.get('request_id') and value.get('request_id') == pending.get('request_id'):
+            if kind == 'privacy_review_revoke' or pending_kind == 'privacy_review_revoke':
+                fail('PRIVACY_CONFLICT', 'review closure conflicts with a pending review action')
+            if kind == pending_kind == 'privacy_review_vote' and same_sender:
+                fail('PRIVACY_CONFLICT', 'review vote already pending')
+            if kind == pending_kind == 'privacy_review_disclose' and value['note_id'] == pending.get('note_id'):
+                fail('PRIVACY_CONFLICT', 'disclosure already pending')
+    if kind == 'privacy_review_request':
+        height = zs_height(db)
+        own_confirmed = global_confirmed = 0
+        if zs_exists(db, 'privacy_requests'):
+            own_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0]
+            global_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0', (height,)).fetchone()[0]
+        if own_confirmed + own_requests >= 8 or global_confirmed + global_requests >= 4096:
+            fail('PRIVACY_CONFLICT', 'confirmed and pending review request quota')
+
+
 def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
     tx,tx_hash,sender=asset_signed_gift(tx,network,kind)
     with closing(asset_writable_database(root/'var/lib/corix/networks'/network/'blockchain/chain.db')) as db:
@@ -2291,15 +2369,11 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
             if old:
                 if tuple(old)!=expected: fail('IDEMPOTENCY_CONFLICT','gift transaction bytes changed')
             else:
+                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
+                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 asset_validate(db,network,tx['type'],tx['data'],sender)
-                if kind in ZS_TYPES:
-                    for raw,public in db.execute('SELECT data,public_key FROM transactions WHERE block_height IS NULL LIMIT 4097'):
-                        pending=strict_json(raw.encode())
-                        if not isinstance(pending,dict):continue
-                        if isinstance(pending.get('proof'),dict) and pending['proof'].get('image')==tx['data'].get('proof',{}).get('image') and 'proof' in tx['data']:fail('PRIVACY_CONFLICT','nullifier already pending')
-                        same_sender=hashlib.sha256(public.rstrip('\n').encode()).hexdigest()==sender
-                        if kind=='privacy_review_request' and same_sender and pending.get('nonce')==tx['data']['nonce']:fail('PRIVACY_CONFLICT','request nonce already pending')
-                        if kind=='privacy_review_vote' and same_sender and pending.get('request_id')==tx['data']['request_id'] and 'decision' in pending:fail('PRIVACY_CONFLICT','review vote already pending')
+                if kind in ZS_TYPES or kind in {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'}:
+                    asset_privacy_pending(db, network, kind, tx['data'], sender)
                 for (raw,) in db.execute("SELECT data FROM transactions WHERE type IN ('zkn_transfer','zkn_private_transfer','zkc_issue') AND block_height IS NULL LIMIT 4097"):
                     pending=strict_json(raw.encode())
                     if kind=='zkn_private_transfer' and 'nonce' in pending and pending.get('token_id')==tx['data']['token_id'] and pending.get('nonce')==tx['data']['nonce']:
@@ -2308,8 +2382,6 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
                         fail('RECIPIENT_REUSED','one-time receiver already has a pending gift')
                     if kind=='zkc_issue' and 'kind' in pending and zkc_edition_id(pending)==zkc_edition_id(tx['data']):
                         fail('EDITION_PENDING','edition already has a pending issue; reuse its transaction')
-                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
-                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 db.execute('INSERT INTO transactions (hash,type,data,signature,public_key,timestamp,block_height) VALUES (?,?,?,?,?,?,NULL)',(tx_hash,*expected))
             db.commit()
         except BaseException: db.rollback();raise
@@ -2457,6 +2529,16 @@ def asset_apply(db, network, tx_hash, tx_type, payload, sender, height):
 def asset_engine_main(args):
     action,db_path,network=args[0],Path(args[1]).absolute(),args[2]
     identifier(network,'network')
+    if action == 'submit-asset':
+        root = Path(args[3]).absolute()
+        if db_path != root/'var/lib/corix/networks'/network/'blockchain/chain.db':
+            fail('SCOPE_MISMATCH', 'native privacy database belongs to another root')
+        tx = strict_json(args[4].encode())
+        if type(tx) is not dict or tx.get('type') not in ZS_TYPES | {'zkn_transfer','zkn_private_transfer','zkc_issue'}:
+            fail('INVALID_PARAMS', 'admitted native asset transaction required')
+        result = asset_submit_gift(root, network, tx, tx['type'])
+        print(result['transaction_hash'])
+        return 0
     if action=='forward':
         root=Path(args[3]).absolute()
         asset_forward_pending(root,network)
@@ -3585,7 +3667,7 @@ MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
-           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes")
+           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
 class ProtocolError(ValueError):
@@ -4008,7 +4090,7 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -4254,7 +4336,7 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
-        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
                 with closing(corium_db(root,network,'blockchain/chain.db')) as db:result=zs_query(db,network,method,request['params'])
@@ -5341,6 +5423,17 @@ ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
 _ZS_ZERO = bytes(32)
 _ZS_ORDER = 2**252 + 27742317777372353535851937790883648493
 _ZS_LIB = None
+_ZS_OPS = {
+    'crypto_core_ristretto255_from_hash': ((64,), True),
+    'crypto_core_ristretto255_scalar_reduce': ((64,), False),
+    'crypto_scalarmult_ristretto255': ((32, 32), True),
+    'crypto_scalarmult_ristretto255_base': ((32,), True),
+    'crypto_core_ristretto255_add': ((32, 32), True),
+    'crypto_core_ristretto255_sub': ((32, 32), True),
+    'crypto_core_ristretto255_scalar_mul': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_add': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_sub': ((32, 32), False),
+}
 
 
 def zs_json(value):
@@ -5379,24 +5472,31 @@ def zs_lib():
             try:lib=_zs_ct.CDLL(name);break
             except OSError:continue
         if lib is None:raise ValueError('libsodium Ristretto255 unavailable')
+        lib.sodium_init.argtypes = []
+        lib.sodium_init.restype = _zs_ct.c_int
         if lib.sodium_init() < 0: raise ValueError('libsodium initialization failed')
-        for function in ('crypto_core_ristretto255_is_valid_point', 'crypto_core_ristretto255_from_hash',
-                         'crypto_core_ristretto255_scalar_reduce', 'crypto_scalarmult_ristretto255',
-                         'crypto_scalarmult_ristretto255_base', 'crypto_core_ristretto255_add',
-                         'crypto_core_ristretto255_sub', 'crypto_core_ristretto255_scalar_mul',
-                         'crypto_core_ristretto255_scalar_add', 'crypto_core_ristretto255_scalar_sub'):
-            getattr(lib, function).restype = _zs_ct.c_int
+        for function, (sizes, status) in _ZS_OPS.items():
+            fn = getattr(lib, function)
+            fn.argtypes = [_zs_ct.c_void_p] * (len(sizes) + 1)
+            fn.restype = _zs_ct.c_int if status else None
+        lib.crypto_core_ristretto255_is_valid_point.argtypes = [_zs_ct.c_void_p]
+        lib.crypto_core_ristretto255_is_valid_point.restype = _zs_ct.c_int
         _ZS_LIB = lib
     return _ZS_LIB
 
 
 def zs_op(name, *values):
+    contract = _ZS_OPS.get(name)
+    if contract is None or len(values) != len(contract[0]) or any(type(v) is not bytes or len(v) != size for v, size in zip(values, contract[0])):
+        raise ValueError('Ristretto exact operation and buffer sizes required')
+    if '_scalar_' in name and not name.endswith('_reduce'):
+        for value in values: zs_scalar(value)
+    elif name.startswith('crypto_scalarmult_'):
+        zs_scalar(values[0])
     output = _zs_ct.create_string_buffer(32)
     fn = getattr(zs_lib(), name)
-    # Scalar operations/from_hash return void; only point operations have status.
     status = fn(output, *(_zs_ct.create_string_buffer(v, len(v)) for v in values))
-    if name in {'crypto_scalarmult_ristretto255', 'crypto_scalarmult_ristretto255_base',
-                'crypto_core_ristretto255_add', 'crypto_core_ristretto255_sub'} and status != 0:
+    if contract[1] and status != 0:
         raise ValueError('Ristretto operation rejected')
     return output.raw
 
@@ -5416,7 +5516,11 @@ def zs_point(value):
 
 
 def zs_reduce(raw): return zs_op('crypto_core_ristretto255_scalar_reduce', raw)
-def zs_random_scalar(): return zs_reduce(_zs_random.token_bytes(64))
+def zs_random_scalar():
+    for _ in range(8):
+        value = zs_reduce(_zs_random.token_bytes(64))
+        if value != _ZS_ZERO: return value
+    raise ValueError('nonzero scalar randomness unavailable')
 def zs_sadd(a, b): return zs_op('crypto_core_ristretto255_scalar_add', a, b)
 def zs_ssub(a, b): return zs_op('crypto_core_ristretto255_scalar_sub', a, b)
 def zs_smul(a, b): return zs_op('crypto_core_ristretto255_scalar_mul', a, b)
@@ -5532,6 +5636,8 @@ def zs_validate(db, network, kind, value, sender):
         else:
             if type(value['ring']) is not list or len(value['ring']) not in (16, 32, 64) or len(set(value['ring'])) != len(value['ring']) or value['ring'] != sorted(value['ring']): raise ValueError('unique canonical fixed ring required')
             zs_hex(value['anchor'])
+            if not zs_exists(db, 'zkn_shield_notes') or not zs_exists(db, 'zkn_shield_images'):
+                raise ValueError('shielded pool not initialized')
             anchor = db.execute('SELECT height FROM blocks WHERE hash=?', (value['anchor'],)).fetchone()
             if not anchor or not 1 <= zs_height(db)-anchor[0] <= 128: raise ValueError('mature canonical anchor required')
             ring = []
@@ -5562,6 +5668,9 @@ def zs_validate(db, network, kind, value, sender):
         if zs_exists(db, 'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0] >= 8: raise ValueError('review request quota')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT 1 FROM privacy_requests WHERE requester=? AND nonce=?',(sender,value['nonce'])).fetchone(): raise ValueError('review request replay')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0',(height,)).fetchone()[0]>=4096: raise ValueError('global review request quota')
+        electorate=db.execute("SELECT stake FROM validators WHERE status='active' AND stake>0 LIMIT 1025").fetchall()
+        if not 1 <= len(electorate) <= 1024 or any(type(weight) is not int or not 0 < weight < 2**53 for (weight,) in electorate):
+            raise ValueError('bounded active validator electorate required')
         return
     if value.get('network_id')!=network:raise ValueError('review network mismatch')
     fields = {'request_id', 'decision'} if kind == 'privacy_review_vote' else {'request_id'} if kind == 'privacy_review_revoke' else {'request_id', 'note_id', 'ciphertext', 'authorization'}
@@ -5659,6 +5768,9 @@ def zs_query(db, network, method, params):
     if method == 'zkn.shield.notes':
         rows=[] if not zs_exists(db,'zkn_shield_notes') else db.execute('SELECT note_id,public_key,commitment,ciphertext,height FROM zkn_shield_notes WHERE note_id>? ORDER BY note_id LIMIT ?',(cursor,limit+1)).fetchall()
         return {'notes':[dict(zip(('note_id','public_key','commitment','ciphertext','height'),r)) for r in rows[:limit]],'next_cursor':rows[limit-1][0] if len(rows)>limit else None,'spent_notes_identifiable':False}
+    if method == 'zkn.shield.images':
+        rows=[] if not zs_exists(db,'zkn_shield_images') else db.execute('SELECT image,height,transaction_hash FROM zkn_shield_images WHERE image>? ORDER BY image LIMIT ?', (cursor, limit+1)).fetchall()
+        return {'images':[dict(zip(('image','height','transaction_hash'),r)) for r in rows[:limit]], 'next_cursor':rows[limit-1][0] if len(rows)>limit else None, 'spent_notes_identifiable':False}
     raise ValueError('unknown privacy query')
 
 """Native signed registration receipts and transferable block-snapshot ZKN assets."""
@@ -5692,8 +5804,8 @@ def zkc_edition_id(payload):
 
 def asset_signed_gift(tx, network, kind='zkn_private_transfer'):
     if (not isinstance(tx,dict) or set(tx)!={'type','data','timestamp','public_key','signature'} or
-            kind not in ({'zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
-            not isinstance(tx['data'],dict) or tx['data'].get('network_id')!=network or
+            kind not in ({'zkn_transfer','zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
+            not isinstance(tx['data'],dict) or (kind != 'zkn_transfer' and tx['data'].get('network_id')!=network) or
             not isinstance(tx['public_key'],str) or len(tx['public_key'])>1024 or
             not isinstance(tx['signature'],str) or len(tx['signature'])>160):
         fail('INVALID_ZKN','scoped signed private gift transaction required')
@@ -5723,6 +5835,54 @@ def asset_writable_database(path):
     return sqlite3.connect(Path(path).absolute().as_uri()+'?mode=rw',uri=True,timeout=5)
 
 
+def asset_privacy_pending(db, network, kind, value, sender):
+    """Reserve privacy conflicts under the caller's BEGIN IMMEDIATE lock.
+
+    Admission policy only: consensus validation must not depend on local mempool
+    contents, whose order and membership differ between validators.
+    """
+    own_requests = global_requests = 0
+    ownership = {'zkn_shield_deposit', 'zkn_transfer', 'zkn_private_transfer'}
+    kinds = sorted(ZS_TYPES | {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'})
+    rows = db.execute('SELECT type,data,public_key FROM transactions WHERE block_height IS NULL AND type IN (' + ','.join('?' for _ in kinds) + ') LIMIT 4097', kinds)
+    for pending_kind, raw, public in rows:
+        pending = strict_json(raw.encode())
+        if type(pending) is not dict: fail('PRIVACY_CONFLICT', 'pending privacy payload requires native recovery')
+        if pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and type(pending.get('proof')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy proof requires native recovery')
+        if pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and type(pending.get('note')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy note requires native recovery')
+        same_sender = hashlib.sha256(public.rstrip('\n').encode()).hexdigest() == sender
+        if kind in ownership | {'zkc_issue'} and pending_kind in ownership | {'zkc_issue'} and (kind in ownership or pending_kind in ownership) and pending.get('token_id') == value['token_id']:
+            fail('PRIVACY_CONFLICT', 'asset already has a pending ownership change')
+        if kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending.get('proof', {}).get('image') == value['proof']['image']:
+            fail('PRIVACY_CONFLICT', 'nullifier already pending')
+        if kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'}:
+            note = pending.get('note', {})
+            if any(note.get(field) == value['note'][field] for field in ('public_key', 'commitment')):
+                fail('PRIVACY_CONFLICT', 'one-time note key or commitment already pending')
+        if pending_kind == 'privacy_review_request':
+            global_requests += 1
+            own_requests += int(same_sender)
+            if kind == 'privacy_review_request' and same_sender and pending.get('nonce') == value['nonce']:
+                fail('PRIVACY_CONFLICT', 'request nonce already pending')
+        if value.get('request_id') and value.get('request_id') == pending.get('request_id'):
+            if kind == 'privacy_review_revoke' or pending_kind == 'privacy_review_revoke':
+                fail('PRIVACY_CONFLICT', 'review closure conflicts with a pending review action')
+            if kind == pending_kind == 'privacy_review_vote' and same_sender:
+                fail('PRIVACY_CONFLICT', 'review vote already pending')
+            if kind == pending_kind == 'privacy_review_disclose' and value['note_id'] == pending.get('note_id'):
+                fail('PRIVACY_CONFLICT', 'disclosure already pending')
+    if kind == 'privacy_review_request':
+        height = zs_height(db)
+        own_confirmed = global_confirmed = 0
+        if zs_exists(db, 'privacy_requests'):
+            own_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0]
+            global_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0', (height,)).fetchone()[0]
+        if own_confirmed + own_requests >= 8 or global_confirmed + global_requests >= 4096:
+            fail('PRIVACY_CONFLICT', 'confirmed and pending review request quota')
+
+
 def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
     tx,tx_hash,sender=asset_signed_gift(tx,network,kind)
     with closing(asset_writable_database(root/'var/lib/corix/networks'/network/'blockchain/chain.db')) as db:
@@ -5733,15 +5893,11 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
             if old:
                 if tuple(old)!=expected: fail('IDEMPOTENCY_CONFLICT','gift transaction bytes changed')
             else:
+                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
+                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 asset_validate(db,network,tx['type'],tx['data'],sender)
-                if kind in ZS_TYPES:
-                    for raw,public in db.execute('SELECT data,public_key FROM transactions WHERE block_height IS NULL LIMIT 4097'):
-                        pending=strict_json(raw.encode())
-                        if not isinstance(pending,dict):continue
-                        if isinstance(pending.get('proof'),dict) and pending['proof'].get('image')==tx['data'].get('proof',{}).get('image') and 'proof' in tx['data']:fail('PRIVACY_CONFLICT','nullifier already pending')
-                        same_sender=hashlib.sha256(public.rstrip('\n').encode()).hexdigest()==sender
-                        if kind=='privacy_review_request' and same_sender and pending.get('nonce')==tx['data']['nonce']:fail('PRIVACY_CONFLICT','request nonce already pending')
-                        if kind=='privacy_review_vote' and same_sender and pending.get('request_id')==tx['data']['request_id'] and 'decision' in pending:fail('PRIVACY_CONFLICT','review vote already pending')
+                if kind in ZS_TYPES or kind in {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'}:
+                    asset_privacy_pending(db, network, kind, tx['data'], sender)
                 for (raw,) in db.execute("SELECT data FROM transactions WHERE type IN ('zkn_transfer','zkn_private_transfer','zkc_issue') AND block_height IS NULL LIMIT 4097"):
                     pending=strict_json(raw.encode())
                     if kind=='zkn_private_transfer' and 'nonce' in pending and pending.get('token_id')==tx['data']['token_id'] and pending.get('nonce')==tx['data']['nonce']:
@@ -5750,8 +5906,6 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
                         fail('RECIPIENT_REUSED','one-time receiver already has a pending gift')
                     if kind=='zkc_issue' and 'kind' in pending and zkc_edition_id(pending)==zkc_edition_id(tx['data']):
                         fail('EDITION_PENDING','edition already has a pending issue; reuse its transaction')
-                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
-                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 db.execute('INSERT INTO transactions (hash,type,data,signature,public_key,timestamp,block_height) VALUES (?,?,?,?,?,?,NULL)',(tx_hash,*expected))
             db.commit()
         except BaseException: db.rollback();raise
@@ -5899,6 +6053,16 @@ def asset_apply(db, network, tx_hash, tx_type, payload, sender, height):
 def asset_engine_main(args):
     action,db_path,network=args[0],Path(args[1]).absolute(),args[2]
     identifier(network,'network')
+    if action == 'submit-asset':
+        root = Path(args[3]).absolute()
+        if db_path != root/'var/lib/corix/networks'/network/'blockchain/chain.db':
+            fail('SCOPE_MISMATCH', 'native privacy database belongs to another root')
+        tx = strict_json(args[4].encode())
+        if type(tx) is not dict or tx.get('type') not in ZS_TYPES | {'zkn_transfer','zkn_private_transfer','zkc_issue'}:
+            fail('INVALID_PARAMS', 'admitted native asset transaction required')
+        result = asset_submit_gift(root, network, tx, tx['type'])
+        print(result['transaction_hash'])
+        return 0
     if action=='forward':
         root=Path(args[3]).absolute()
         asset_forward_pending(root,network)
@@ -7035,7 +7199,7 @@ MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
-           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes")
+           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
 class ProtocolError(ValueError):
@@ -7458,7 +7622,7 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -7704,7 +7868,7 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
-        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
                 with closing(corium_db(root,network,'blockchain/chain.db')) as db:result=zs_query(db,network,method,request['params'])
@@ -8791,6 +8955,17 @@ ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
 _ZS_ZERO = bytes(32)
 _ZS_ORDER = 2**252 + 27742317777372353535851937790883648493
 _ZS_LIB = None
+_ZS_OPS = {
+    'crypto_core_ristretto255_from_hash': ((64,), True),
+    'crypto_core_ristretto255_scalar_reduce': ((64,), False),
+    'crypto_scalarmult_ristretto255': ((32, 32), True),
+    'crypto_scalarmult_ristretto255_base': ((32,), True),
+    'crypto_core_ristretto255_add': ((32, 32), True),
+    'crypto_core_ristretto255_sub': ((32, 32), True),
+    'crypto_core_ristretto255_scalar_mul': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_add': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_sub': ((32, 32), False),
+}
 
 
 def zs_json(value):
@@ -8829,24 +9004,31 @@ def zs_lib():
             try:lib=_zs_ct.CDLL(name);break
             except OSError:continue
         if lib is None:raise ValueError('libsodium Ristretto255 unavailable')
+        lib.sodium_init.argtypes = []
+        lib.sodium_init.restype = _zs_ct.c_int
         if lib.sodium_init() < 0: raise ValueError('libsodium initialization failed')
-        for function in ('crypto_core_ristretto255_is_valid_point', 'crypto_core_ristretto255_from_hash',
-                         'crypto_core_ristretto255_scalar_reduce', 'crypto_scalarmult_ristretto255',
-                         'crypto_scalarmult_ristretto255_base', 'crypto_core_ristretto255_add',
-                         'crypto_core_ristretto255_sub', 'crypto_core_ristretto255_scalar_mul',
-                         'crypto_core_ristretto255_scalar_add', 'crypto_core_ristretto255_scalar_sub'):
-            getattr(lib, function).restype = _zs_ct.c_int
+        for function, (sizes, status) in _ZS_OPS.items():
+            fn = getattr(lib, function)
+            fn.argtypes = [_zs_ct.c_void_p] * (len(sizes) + 1)
+            fn.restype = _zs_ct.c_int if status else None
+        lib.crypto_core_ristretto255_is_valid_point.argtypes = [_zs_ct.c_void_p]
+        lib.crypto_core_ristretto255_is_valid_point.restype = _zs_ct.c_int
         _ZS_LIB = lib
     return _ZS_LIB
 
 
 def zs_op(name, *values):
+    contract = _ZS_OPS.get(name)
+    if contract is None or len(values) != len(contract[0]) or any(type(v) is not bytes or len(v) != size for v, size in zip(values, contract[0])):
+        raise ValueError('Ristretto exact operation and buffer sizes required')
+    if '_scalar_' in name and not name.endswith('_reduce'):
+        for value in values: zs_scalar(value)
+    elif name.startswith('crypto_scalarmult_'):
+        zs_scalar(values[0])
     output = _zs_ct.create_string_buffer(32)
     fn = getattr(zs_lib(), name)
-    # Scalar operations/from_hash return void; only point operations have status.
     status = fn(output, *(_zs_ct.create_string_buffer(v, len(v)) for v in values))
-    if name in {'crypto_scalarmult_ristretto255', 'crypto_scalarmult_ristretto255_base',
-                'crypto_core_ristretto255_add', 'crypto_core_ristretto255_sub'} and status != 0:
+    if contract[1] and status != 0:
         raise ValueError('Ristretto operation rejected')
     return output.raw
 
@@ -8866,7 +9048,11 @@ def zs_point(value):
 
 
 def zs_reduce(raw): return zs_op('crypto_core_ristretto255_scalar_reduce', raw)
-def zs_random_scalar(): return zs_reduce(_zs_random.token_bytes(64))
+def zs_random_scalar():
+    for _ in range(8):
+        value = zs_reduce(_zs_random.token_bytes(64))
+        if value != _ZS_ZERO: return value
+    raise ValueError('nonzero scalar randomness unavailable')
 def zs_sadd(a, b): return zs_op('crypto_core_ristretto255_scalar_add', a, b)
 def zs_ssub(a, b): return zs_op('crypto_core_ristretto255_scalar_sub', a, b)
 def zs_smul(a, b): return zs_op('crypto_core_ristretto255_scalar_mul', a, b)
@@ -8982,6 +9168,8 @@ def zs_validate(db, network, kind, value, sender):
         else:
             if type(value['ring']) is not list or len(value['ring']) not in (16, 32, 64) or len(set(value['ring'])) != len(value['ring']) or value['ring'] != sorted(value['ring']): raise ValueError('unique canonical fixed ring required')
             zs_hex(value['anchor'])
+            if not zs_exists(db, 'zkn_shield_notes') or not zs_exists(db, 'zkn_shield_images'):
+                raise ValueError('shielded pool not initialized')
             anchor = db.execute('SELECT height FROM blocks WHERE hash=?', (value['anchor'],)).fetchone()
             if not anchor or not 1 <= zs_height(db)-anchor[0] <= 128: raise ValueError('mature canonical anchor required')
             ring = []
@@ -9012,6 +9200,9 @@ def zs_validate(db, network, kind, value, sender):
         if zs_exists(db, 'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0] >= 8: raise ValueError('review request quota')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT 1 FROM privacy_requests WHERE requester=? AND nonce=?',(sender,value['nonce'])).fetchone(): raise ValueError('review request replay')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0',(height,)).fetchone()[0]>=4096: raise ValueError('global review request quota')
+        electorate=db.execute("SELECT stake FROM validators WHERE status='active' AND stake>0 LIMIT 1025").fetchall()
+        if not 1 <= len(electorate) <= 1024 or any(type(weight) is not int or not 0 < weight < 2**53 for (weight,) in electorate):
+            raise ValueError('bounded active validator electorate required')
         return
     if value.get('network_id')!=network:raise ValueError('review network mismatch')
     fields = {'request_id', 'decision'} if kind == 'privacy_review_vote' else {'request_id'} if kind == 'privacy_review_revoke' else {'request_id', 'note_id', 'ciphertext', 'authorization'}
@@ -9109,6 +9300,9 @@ def zs_query(db, network, method, params):
     if method == 'zkn.shield.notes':
         rows=[] if not zs_exists(db,'zkn_shield_notes') else db.execute('SELECT note_id,public_key,commitment,ciphertext,height FROM zkn_shield_notes WHERE note_id>? ORDER BY note_id LIMIT ?',(cursor,limit+1)).fetchall()
         return {'notes':[dict(zip(('note_id','public_key','commitment','ciphertext','height'),r)) for r in rows[:limit]],'next_cursor':rows[limit-1][0] if len(rows)>limit else None,'spent_notes_identifiable':False}
+    if method == 'zkn.shield.images':
+        rows=[] if not zs_exists(db,'zkn_shield_images') else db.execute('SELECT image,height,transaction_hash FROM zkn_shield_images WHERE image>? ORDER BY image LIMIT ?', (cursor, limit+1)).fetchall()
+        return {'images':[dict(zip(('image','height','transaction_hash'),r)) for r in rows[:limit]], 'next_cursor':rows[limit-1][0] if len(rows)>limit else None, 'spent_notes_identifiable':False}
     raise ValueError('unknown privacy query')
 
 """Native signed registration receipts and transferable block-snapshot ZKN assets."""
@@ -9142,8 +9336,8 @@ def zkc_edition_id(payload):
 
 def asset_signed_gift(tx, network, kind='zkn_private_transfer'):
     if (not isinstance(tx,dict) or set(tx)!={'type','data','timestamp','public_key','signature'} or
-            kind not in ({'zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
-            not isinstance(tx['data'],dict) or tx['data'].get('network_id')!=network or
+            kind not in ({'zkn_transfer','zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
+            not isinstance(tx['data'],dict) or (kind != 'zkn_transfer' and tx['data'].get('network_id')!=network) or
             not isinstance(tx['public_key'],str) or len(tx['public_key'])>1024 or
             not isinstance(tx['signature'],str) or len(tx['signature'])>160):
         fail('INVALID_ZKN','scoped signed private gift transaction required')
@@ -9173,6 +9367,54 @@ def asset_writable_database(path):
     return sqlite3.connect(Path(path).absolute().as_uri()+'?mode=rw',uri=True,timeout=5)
 
 
+def asset_privacy_pending(db, network, kind, value, sender):
+    """Reserve privacy conflicts under the caller's BEGIN IMMEDIATE lock.
+
+    Admission policy only: consensus validation must not depend on local mempool
+    contents, whose order and membership differ between validators.
+    """
+    own_requests = global_requests = 0
+    ownership = {'zkn_shield_deposit', 'zkn_transfer', 'zkn_private_transfer'}
+    kinds = sorted(ZS_TYPES | {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'})
+    rows = db.execute('SELECT type,data,public_key FROM transactions WHERE block_height IS NULL AND type IN (' + ','.join('?' for _ in kinds) + ') LIMIT 4097', kinds)
+    for pending_kind, raw, public in rows:
+        pending = strict_json(raw.encode())
+        if type(pending) is not dict: fail('PRIVACY_CONFLICT', 'pending privacy payload requires native recovery')
+        if pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and type(pending.get('proof')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy proof requires native recovery')
+        if pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and type(pending.get('note')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy note requires native recovery')
+        same_sender = hashlib.sha256(public.rstrip('\n').encode()).hexdigest() == sender
+        if kind in ownership | {'zkc_issue'} and pending_kind in ownership | {'zkc_issue'} and (kind in ownership or pending_kind in ownership) and pending.get('token_id') == value['token_id']:
+            fail('PRIVACY_CONFLICT', 'asset already has a pending ownership change')
+        if kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending.get('proof', {}).get('image') == value['proof']['image']:
+            fail('PRIVACY_CONFLICT', 'nullifier already pending')
+        if kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'}:
+            note = pending.get('note', {})
+            if any(note.get(field) == value['note'][field] for field in ('public_key', 'commitment')):
+                fail('PRIVACY_CONFLICT', 'one-time note key or commitment already pending')
+        if pending_kind == 'privacy_review_request':
+            global_requests += 1
+            own_requests += int(same_sender)
+            if kind == 'privacy_review_request' and same_sender and pending.get('nonce') == value['nonce']:
+                fail('PRIVACY_CONFLICT', 'request nonce already pending')
+        if value.get('request_id') and value.get('request_id') == pending.get('request_id'):
+            if kind == 'privacy_review_revoke' or pending_kind == 'privacy_review_revoke':
+                fail('PRIVACY_CONFLICT', 'review closure conflicts with a pending review action')
+            if kind == pending_kind == 'privacy_review_vote' and same_sender:
+                fail('PRIVACY_CONFLICT', 'review vote already pending')
+            if kind == pending_kind == 'privacy_review_disclose' and value['note_id'] == pending.get('note_id'):
+                fail('PRIVACY_CONFLICT', 'disclosure already pending')
+    if kind == 'privacy_review_request':
+        height = zs_height(db)
+        own_confirmed = global_confirmed = 0
+        if zs_exists(db, 'privacy_requests'):
+            own_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0]
+            global_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0', (height,)).fetchone()[0]
+        if own_confirmed + own_requests >= 8 or global_confirmed + global_requests >= 4096:
+            fail('PRIVACY_CONFLICT', 'confirmed and pending review request quota')
+
+
 def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
     tx,tx_hash,sender=asset_signed_gift(tx,network,kind)
     with closing(asset_writable_database(root/'var/lib/corix/networks'/network/'blockchain/chain.db')) as db:
@@ -9183,15 +9425,11 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
             if old:
                 if tuple(old)!=expected: fail('IDEMPOTENCY_CONFLICT','gift transaction bytes changed')
             else:
+                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
+                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 asset_validate(db,network,tx['type'],tx['data'],sender)
-                if kind in ZS_TYPES:
-                    for raw,public in db.execute('SELECT data,public_key FROM transactions WHERE block_height IS NULL LIMIT 4097'):
-                        pending=strict_json(raw.encode())
-                        if not isinstance(pending,dict):continue
-                        if isinstance(pending.get('proof'),dict) and pending['proof'].get('image')==tx['data'].get('proof',{}).get('image') and 'proof' in tx['data']:fail('PRIVACY_CONFLICT','nullifier already pending')
-                        same_sender=hashlib.sha256(public.rstrip('\n').encode()).hexdigest()==sender
-                        if kind=='privacy_review_request' and same_sender and pending.get('nonce')==tx['data']['nonce']:fail('PRIVACY_CONFLICT','request nonce already pending')
-                        if kind=='privacy_review_vote' and same_sender and pending.get('request_id')==tx['data']['request_id'] and 'decision' in pending:fail('PRIVACY_CONFLICT','review vote already pending')
+                if kind in ZS_TYPES or kind in {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'}:
+                    asset_privacy_pending(db, network, kind, tx['data'], sender)
                 for (raw,) in db.execute("SELECT data FROM transactions WHERE type IN ('zkn_transfer','zkn_private_transfer','zkc_issue') AND block_height IS NULL LIMIT 4097"):
                     pending=strict_json(raw.encode())
                     if kind=='zkn_private_transfer' and 'nonce' in pending and pending.get('token_id')==tx['data']['token_id'] and pending.get('nonce')==tx['data']['nonce']:
@@ -9200,8 +9438,6 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
                         fail('RECIPIENT_REUSED','one-time receiver already has a pending gift')
                     if kind=='zkc_issue' and 'kind' in pending and zkc_edition_id(pending)==zkc_edition_id(tx['data']):
                         fail('EDITION_PENDING','edition already has a pending issue; reuse its transaction')
-                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
-                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 db.execute('INSERT INTO transactions (hash,type,data,signature,public_key,timestamp,block_height) VALUES (?,?,?,?,?,?,NULL)',(tx_hash,*expected))
             db.commit()
         except BaseException: db.rollback();raise
@@ -9349,6 +9585,16 @@ def asset_apply(db, network, tx_hash, tx_type, payload, sender, height):
 def asset_engine_main(args):
     action,db_path,network=args[0],Path(args[1]).absolute(),args[2]
     identifier(network,'network')
+    if action == 'submit-asset':
+        root = Path(args[3]).absolute()
+        if db_path != root/'var/lib/corix/networks'/network/'blockchain/chain.db':
+            fail('SCOPE_MISMATCH', 'native privacy database belongs to another root')
+        tx = strict_json(args[4].encode())
+        if type(tx) is not dict or tx.get('type') not in ZS_TYPES | {'zkn_transfer','zkn_private_transfer','zkc_issue'}:
+            fail('INVALID_PARAMS', 'admitted native asset transaction required')
+        result = asset_submit_gift(root, network, tx, tx['type'])
+        print(result['transaction_hash'])
+        return 0
     if action=='forward':
         root=Path(args[3]).absolute()
         asset_forward_pending(root,network)
@@ -10129,7 +10375,7 @@ MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
-           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes")
+           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
 class ProtocolError(ValueError):
@@ -10552,7 +10798,7 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -10798,7 +11044,7 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
-        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
                 with closing(corium_db(root,network,'blockchain/chain.db')) as db:result=zs_query(db,network,method,request['params'])
@@ -11885,6 +12131,17 @@ ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
 _ZS_ZERO = bytes(32)
 _ZS_ORDER = 2**252 + 27742317777372353535851937790883648493
 _ZS_LIB = None
+_ZS_OPS = {
+    'crypto_core_ristretto255_from_hash': ((64,), True),
+    'crypto_core_ristretto255_scalar_reduce': ((64,), False),
+    'crypto_scalarmult_ristretto255': ((32, 32), True),
+    'crypto_scalarmult_ristretto255_base': ((32,), True),
+    'crypto_core_ristretto255_add': ((32, 32), True),
+    'crypto_core_ristretto255_sub': ((32, 32), True),
+    'crypto_core_ristretto255_scalar_mul': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_add': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_sub': ((32, 32), False),
+}
 
 
 def zs_json(value):
@@ -11923,24 +12180,31 @@ def zs_lib():
             try:lib=_zs_ct.CDLL(name);break
             except OSError:continue
         if lib is None:raise ValueError('libsodium Ristretto255 unavailable')
+        lib.sodium_init.argtypes = []
+        lib.sodium_init.restype = _zs_ct.c_int
         if lib.sodium_init() < 0: raise ValueError('libsodium initialization failed')
-        for function in ('crypto_core_ristretto255_is_valid_point', 'crypto_core_ristretto255_from_hash',
-                         'crypto_core_ristretto255_scalar_reduce', 'crypto_scalarmult_ristretto255',
-                         'crypto_scalarmult_ristretto255_base', 'crypto_core_ristretto255_add',
-                         'crypto_core_ristretto255_sub', 'crypto_core_ristretto255_scalar_mul',
-                         'crypto_core_ristretto255_scalar_add', 'crypto_core_ristretto255_scalar_sub'):
-            getattr(lib, function).restype = _zs_ct.c_int
+        for function, (sizes, status) in _ZS_OPS.items():
+            fn = getattr(lib, function)
+            fn.argtypes = [_zs_ct.c_void_p] * (len(sizes) + 1)
+            fn.restype = _zs_ct.c_int if status else None
+        lib.crypto_core_ristretto255_is_valid_point.argtypes = [_zs_ct.c_void_p]
+        lib.crypto_core_ristretto255_is_valid_point.restype = _zs_ct.c_int
         _ZS_LIB = lib
     return _ZS_LIB
 
 
 def zs_op(name, *values):
+    contract = _ZS_OPS.get(name)
+    if contract is None or len(values) != len(contract[0]) or any(type(v) is not bytes or len(v) != size for v, size in zip(values, contract[0])):
+        raise ValueError('Ristretto exact operation and buffer sizes required')
+    if '_scalar_' in name and not name.endswith('_reduce'):
+        for value in values: zs_scalar(value)
+    elif name.startswith('crypto_scalarmult_'):
+        zs_scalar(values[0])
     output = _zs_ct.create_string_buffer(32)
     fn = getattr(zs_lib(), name)
-    # Scalar operations/from_hash return void; only point operations have status.
     status = fn(output, *(_zs_ct.create_string_buffer(v, len(v)) for v in values))
-    if name in {'crypto_scalarmult_ristretto255', 'crypto_scalarmult_ristretto255_base',
-                'crypto_core_ristretto255_add', 'crypto_core_ristretto255_sub'} and status != 0:
+    if contract[1] and status != 0:
         raise ValueError('Ristretto operation rejected')
     return output.raw
 
@@ -11960,7 +12224,11 @@ def zs_point(value):
 
 
 def zs_reduce(raw): return zs_op('crypto_core_ristretto255_scalar_reduce', raw)
-def zs_random_scalar(): return zs_reduce(_zs_random.token_bytes(64))
+def zs_random_scalar():
+    for _ in range(8):
+        value = zs_reduce(_zs_random.token_bytes(64))
+        if value != _ZS_ZERO: return value
+    raise ValueError('nonzero scalar randomness unavailable')
 def zs_sadd(a, b): return zs_op('crypto_core_ristretto255_scalar_add', a, b)
 def zs_ssub(a, b): return zs_op('crypto_core_ristretto255_scalar_sub', a, b)
 def zs_smul(a, b): return zs_op('crypto_core_ristretto255_scalar_mul', a, b)
@@ -12076,6 +12344,8 @@ def zs_validate(db, network, kind, value, sender):
         else:
             if type(value['ring']) is not list or len(value['ring']) not in (16, 32, 64) or len(set(value['ring'])) != len(value['ring']) or value['ring'] != sorted(value['ring']): raise ValueError('unique canonical fixed ring required')
             zs_hex(value['anchor'])
+            if not zs_exists(db, 'zkn_shield_notes') or not zs_exists(db, 'zkn_shield_images'):
+                raise ValueError('shielded pool not initialized')
             anchor = db.execute('SELECT height FROM blocks WHERE hash=?', (value['anchor'],)).fetchone()
             if not anchor or not 1 <= zs_height(db)-anchor[0] <= 128: raise ValueError('mature canonical anchor required')
             ring = []
@@ -12106,6 +12376,9 @@ def zs_validate(db, network, kind, value, sender):
         if zs_exists(db, 'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0] >= 8: raise ValueError('review request quota')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT 1 FROM privacy_requests WHERE requester=? AND nonce=?',(sender,value['nonce'])).fetchone(): raise ValueError('review request replay')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0',(height,)).fetchone()[0]>=4096: raise ValueError('global review request quota')
+        electorate=db.execute("SELECT stake FROM validators WHERE status='active' AND stake>0 LIMIT 1025").fetchall()
+        if not 1 <= len(electorate) <= 1024 or any(type(weight) is not int or not 0 < weight < 2**53 for (weight,) in electorate):
+            raise ValueError('bounded active validator electorate required')
         return
     if value.get('network_id')!=network:raise ValueError('review network mismatch')
     fields = {'request_id', 'decision'} if kind == 'privacy_review_vote' else {'request_id'} if kind == 'privacy_review_revoke' else {'request_id', 'note_id', 'ciphertext', 'authorization'}
@@ -12203,6 +12476,9 @@ def zs_query(db, network, method, params):
     if method == 'zkn.shield.notes':
         rows=[] if not zs_exists(db,'zkn_shield_notes') else db.execute('SELECT note_id,public_key,commitment,ciphertext,height FROM zkn_shield_notes WHERE note_id>? ORDER BY note_id LIMIT ?',(cursor,limit+1)).fetchall()
         return {'notes':[dict(zip(('note_id','public_key','commitment','ciphertext','height'),r)) for r in rows[:limit]],'next_cursor':rows[limit-1][0] if len(rows)>limit else None,'spent_notes_identifiable':False}
+    if method == 'zkn.shield.images':
+        rows=[] if not zs_exists(db,'zkn_shield_images') else db.execute('SELECT image,height,transaction_hash FROM zkn_shield_images WHERE image>? ORDER BY image LIMIT ?', (cursor, limit+1)).fetchall()
+        return {'images':[dict(zip(('image','height','transaction_hash'),r)) for r in rows[:limit]], 'next_cursor':rows[limit-1][0] if len(rows)>limit else None, 'spent_notes_identifiable':False}
     raise ValueError('unknown privacy query')
 
 """Native signed registration receipts and transferable block-snapshot ZKN assets."""
@@ -12236,8 +12512,8 @@ def zkc_edition_id(payload):
 
 def asset_signed_gift(tx, network, kind='zkn_private_transfer'):
     if (not isinstance(tx,dict) or set(tx)!={'type','data','timestamp','public_key','signature'} or
-            kind not in ({'zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
-            not isinstance(tx['data'],dict) or tx['data'].get('network_id')!=network or
+            kind not in ({'zkn_transfer','zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
+            not isinstance(tx['data'],dict) or (kind != 'zkn_transfer' and tx['data'].get('network_id')!=network) or
             not isinstance(tx['public_key'],str) or len(tx['public_key'])>1024 or
             not isinstance(tx['signature'],str) or len(tx['signature'])>160):
         fail('INVALID_ZKN','scoped signed private gift transaction required')
@@ -12267,6 +12543,54 @@ def asset_writable_database(path):
     return sqlite3.connect(Path(path).absolute().as_uri()+'?mode=rw',uri=True,timeout=5)
 
 
+def asset_privacy_pending(db, network, kind, value, sender):
+    """Reserve privacy conflicts under the caller's BEGIN IMMEDIATE lock.
+
+    Admission policy only: consensus validation must not depend on local mempool
+    contents, whose order and membership differ between validators.
+    """
+    own_requests = global_requests = 0
+    ownership = {'zkn_shield_deposit', 'zkn_transfer', 'zkn_private_transfer'}
+    kinds = sorted(ZS_TYPES | {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'})
+    rows = db.execute('SELECT type,data,public_key FROM transactions WHERE block_height IS NULL AND type IN (' + ','.join('?' for _ in kinds) + ') LIMIT 4097', kinds)
+    for pending_kind, raw, public in rows:
+        pending = strict_json(raw.encode())
+        if type(pending) is not dict: fail('PRIVACY_CONFLICT', 'pending privacy payload requires native recovery')
+        if pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and type(pending.get('proof')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy proof requires native recovery')
+        if pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and type(pending.get('note')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy note requires native recovery')
+        same_sender = hashlib.sha256(public.rstrip('\n').encode()).hexdigest() == sender
+        if kind in ownership | {'zkc_issue'} and pending_kind in ownership | {'zkc_issue'} and (kind in ownership or pending_kind in ownership) and pending.get('token_id') == value['token_id']:
+            fail('PRIVACY_CONFLICT', 'asset already has a pending ownership change')
+        if kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending.get('proof', {}).get('image') == value['proof']['image']:
+            fail('PRIVACY_CONFLICT', 'nullifier already pending')
+        if kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'}:
+            note = pending.get('note', {})
+            if any(note.get(field) == value['note'][field] for field in ('public_key', 'commitment')):
+                fail('PRIVACY_CONFLICT', 'one-time note key or commitment already pending')
+        if pending_kind == 'privacy_review_request':
+            global_requests += 1
+            own_requests += int(same_sender)
+            if kind == 'privacy_review_request' and same_sender and pending.get('nonce') == value['nonce']:
+                fail('PRIVACY_CONFLICT', 'request nonce already pending')
+        if value.get('request_id') and value.get('request_id') == pending.get('request_id'):
+            if kind == 'privacy_review_revoke' or pending_kind == 'privacy_review_revoke':
+                fail('PRIVACY_CONFLICT', 'review closure conflicts with a pending review action')
+            if kind == pending_kind == 'privacy_review_vote' and same_sender:
+                fail('PRIVACY_CONFLICT', 'review vote already pending')
+            if kind == pending_kind == 'privacy_review_disclose' and value['note_id'] == pending.get('note_id'):
+                fail('PRIVACY_CONFLICT', 'disclosure already pending')
+    if kind == 'privacy_review_request':
+        height = zs_height(db)
+        own_confirmed = global_confirmed = 0
+        if zs_exists(db, 'privacy_requests'):
+            own_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0]
+            global_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0', (height,)).fetchone()[0]
+        if own_confirmed + own_requests >= 8 or global_confirmed + global_requests >= 4096:
+            fail('PRIVACY_CONFLICT', 'confirmed and pending review request quota')
+
+
 def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
     tx,tx_hash,sender=asset_signed_gift(tx,network,kind)
     with closing(asset_writable_database(root/'var/lib/corix/networks'/network/'blockchain/chain.db')) as db:
@@ -12277,15 +12601,11 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
             if old:
                 if tuple(old)!=expected: fail('IDEMPOTENCY_CONFLICT','gift transaction bytes changed')
             else:
+                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
+                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 asset_validate(db,network,tx['type'],tx['data'],sender)
-                if kind in ZS_TYPES:
-                    for raw,public in db.execute('SELECT data,public_key FROM transactions WHERE block_height IS NULL LIMIT 4097'):
-                        pending=strict_json(raw.encode())
-                        if not isinstance(pending,dict):continue
-                        if isinstance(pending.get('proof'),dict) and pending['proof'].get('image')==tx['data'].get('proof',{}).get('image') and 'proof' in tx['data']:fail('PRIVACY_CONFLICT','nullifier already pending')
-                        same_sender=hashlib.sha256(public.rstrip('\n').encode()).hexdigest()==sender
-                        if kind=='privacy_review_request' and same_sender and pending.get('nonce')==tx['data']['nonce']:fail('PRIVACY_CONFLICT','request nonce already pending')
-                        if kind=='privacy_review_vote' and same_sender and pending.get('request_id')==tx['data']['request_id'] and 'decision' in pending:fail('PRIVACY_CONFLICT','review vote already pending')
+                if kind in ZS_TYPES or kind in {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'}:
+                    asset_privacy_pending(db, network, kind, tx['data'], sender)
                 for (raw,) in db.execute("SELECT data FROM transactions WHERE type IN ('zkn_transfer','zkn_private_transfer','zkc_issue') AND block_height IS NULL LIMIT 4097"):
                     pending=strict_json(raw.encode())
                     if kind=='zkn_private_transfer' and 'nonce' in pending and pending.get('token_id')==tx['data']['token_id'] and pending.get('nonce')==tx['data']['nonce']:
@@ -12294,8 +12614,6 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
                         fail('RECIPIENT_REUSED','one-time receiver already has a pending gift')
                     if kind=='zkc_issue' and 'kind' in pending and zkc_edition_id(pending)==zkc_edition_id(tx['data']):
                         fail('EDITION_PENDING','edition already has a pending issue; reuse its transaction')
-                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
-                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 db.execute('INSERT INTO transactions (hash,type,data,signature,public_key,timestamp,block_height) VALUES (?,?,?,?,?,?,NULL)',(tx_hash,*expected))
             db.commit()
         except BaseException: db.rollback();raise
@@ -12443,6 +12761,16 @@ def asset_apply(db, network, tx_hash, tx_type, payload, sender, height):
 def asset_engine_main(args):
     action,db_path,network=args[0],Path(args[1]).absolute(),args[2]
     identifier(network,'network')
+    if action == 'submit-asset':
+        root = Path(args[3]).absolute()
+        if db_path != root/'var/lib/corix/networks'/network/'blockchain/chain.db':
+            fail('SCOPE_MISMATCH', 'native privacy database belongs to another root')
+        tx = strict_json(args[4].encode())
+        if type(tx) is not dict or tx.get('type') not in ZS_TYPES | {'zkn_transfer','zkn_private_transfer','zkc_issue'}:
+            fail('INVALID_PARAMS', 'admitted native asset transaction required')
+        result = asset_submit_gift(root, network, tx, tx['type'])
+        print(result['transaction_hash'])
+        return 0
     if action=='forward':
         root=Path(args[3]).absolute()
         asset_forward_pending(root,network)
@@ -13164,7 +13492,7 @@ MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
-           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes")
+           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
 class ProtocolError(ValueError):
@@ -13587,7 +13915,7 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -13833,7 +14161,7 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
-        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
                 with closing(corium_db(root,network,'blockchain/chain.db')) as db:result=zs_query(db,network,method,request['params'])
@@ -14920,6 +15248,17 @@ ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
 _ZS_ZERO = bytes(32)
 _ZS_ORDER = 2**252 + 27742317777372353535851937790883648493
 _ZS_LIB = None
+_ZS_OPS = {
+    'crypto_core_ristretto255_from_hash': ((64,), True),
+    'crypto_core_ristretto255_scalar_reduce': ((64,), False),
+    'crypto_scalarmult_ristretto255': ((32, 32), True),
+    'crypto_scalarmult_ristretto255_base': ((32,), True),
+    'crypto_core_ristretto255_add': ((32, 32), True),
+    'crypto_core_ristretto255_sub': ((32, 32), True),
+    'crypto_core_ristretto255_scalar_mul': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_add': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_sub': ((32, 32), False),
+}
 
 
 def zs_json(value):
@@ -14958,24 +15297,31 @@ def zs_lib():
             try:lib=_zs_ct.CDLL(name);break
             except OSError:continue
         if lib is None:raise ValueError('libsodium Ristretto255 unavailable')
+        lib.sodium_init.argtypes = []
+        lib.sodium_init.restype = _zs_ct.c_int
         if lib.sodium_init() < 0: raise ValueError('libsodium initialization failed')
-        for function in ('crypto_core_ristretto255_is_valid_point', 'crypto_core_ristretto255_from_hash',
-                         'crypto_core_ristretto255_scalar_reduce', 'crypto_scalarmult_ristretto255',
-                         'crypto_scalarmult_ristretto255_base', 'crypto_core_ristretto255_add',
-                         'crypto_core_ristretto255_sub', 'crypto_core_ristretto255_scalar_mul',
-                         'crypto_core_ristretto255_scalar_add', 'crypto_core_ristretto255_scalar_sub'):
-            getattr(lib, function).restype = _zs_ct.c_int
+        for function, (sizes, status) in _ZS_OPS.items():
+            fn = getattr(lib, function)
+            fn.argtypes = [_zs_ct.c_void_p] * (len(sizes) + 1)
+            fn.restype = _zs_ct.c_int if status else None
+        lib.crypto_core_ristretto255_is_valid_point.argtypes = [_zs_ct.c_void_p]
+        lib.crypto_core_ristretto255_is_valid_point.restype = _zs_ct.c_int
         _ZS_LIB = lib
     return _ZS_LIB
 
 
 def zs_op(name, *values):
+    contract = _ZS_OPS.get(name)
+    if contract is None or len(values) != len(contract[0]) or any(type(v) is not bytes or len(v) != size for v, size in zip(values, contract[0])):
+        raise ValueError('Ristretto exact operation and buffer sizes required')
+    if '_scalar_' in name and not name.endswith('_reduce'):
+        for value in values: zs_scalar(value)
+    elif name.startswith('crypto_scalarmult_'):
+        zs_scalar(values[0])
     output = _zs_ct.create_string_buffer(32)
     fn = getattr(zs_lib(), name)
-    # Scalar operations/from_hash return void; only point operations have status.
     status = fn(output, *(_zs_ct.create_string_buffer(v, len(v)) for v in values))
-    if name in {'crypto_scalarmult_ristretto255', 'crypto_scalarmult_ristretto255_base',
-                'crypto_core_ristretto255_add', 'crypto_core_ristretto255_sub'} and status != 0:
+    if contract[1] and status != 0:
         raise ValueError('Ristretto operation rejected')
     return output.raw
 
@@ -14995,7 +15341,11 @@ def zs_point(value):
 
 
 def zs_reduce(raw): return zs_op('crypto_core_ristretto255_scalar_reduce', raw)
-def zs_random_scalar(): return zs_reduce(_zs_random.token_bytes(64))
+def zs_random_scalar():
+    for _ in range(8):
+        value = zs_reduce(_zs_random.token_bytes(64))
+        if value != _ZS_ZERO: return value
+    raise ValueError('nonzero scalar randomness unavailable')
 def zs_sadd(a, b): return zs_op('crypto_core_ristretto255_scalar_add', a, b)
 def zs_ssub(a, b): return zs_op('crypto_core_ristretto255_scalar_sub', a, b)
 def zs_smul(a, b): return zs_op('crypto_core_ristretto255_scalar_mul', a, b)
@@ -15111,6 +15461,8 @@ def zs_validate(db, network, kind, value, sender):
         else:
             if type(value['ring']) is not list or len(value['ring']) not in (16, 32, 64) or len(set(value['ring'])) != len(value['ring']) or value['ring'] != sorted(value['ring']): raise ValueError('unique canonical fixed ring required')
             zs_hex(value['anchor'])
+            if not zs_exists(db, 'zkn_shield_notes') or not zs_exists(db, 'zkn_shield_images'):
+                raise ValueError('shielded pool not initialized')
             anchor = db.execute('SELECT height FROM blocks WHERE hash=?', (value['anchor'],)).fetchone()
             if not anchor or not 1 <= zs_height(db)-anchor[0] <= 128: raise ValueError('mature canonical anchor required')
             ring = []
@@ -15141,6 +15493,9 @@ def zs_validate(db, network, kind, value, sender):
         if zs_exists(db, 'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0] >= 8: raise ValueError('review request quota')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT 1 FROM privacy_requests WHERE requester=? AND nonce=?',(sender,value['nonce'])).fetchone(): raise ValueError('review request replay')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0',(height,)).fetchone()[0]>=4096: raise ValueError('global review request quota')
+        electorate=db.execute("SELECT stake FROM validators WHERE status='active' AND stake>0 LIMIT 1025").fetchall()
+        if not 1 <= len(electorate) <= 1024 or any(type(weight) is not int or not 0 < weight < 2**53 for (weight,) in electorate):
+            raise ValueError('bounded active validator electorate required')
         return
     if value.get('network_id')!=network:raise ValueError('review network mismatch')
     fields = {'request_id', 'decision'} if kind == 'privacy_review_vote' else {'request_id'} if kind == 'privacy_review_revoke' else {'request_id', 'note_id', 'ciphertext', 'authorization'}
@@ -15238,6 +15593,9 @@ def zs_query(db, network, method, params):
     if method == 'zkn.shield.notes':
         rows=[] if not zs_exists(db,'zkn_shield_notes') else db.execute('SELECT note_id,public_key,commitment,ciphertext,height FROM zkn_shield_notes WHERE note_id>? ORDER BY note_id LIMIT ?',(cursor,limit+1)).fetchall()
         return {'notes':[dict(zip(('note_id','public_key','commitment','ciphertext','height'),r)) for r in rows[:limit]],'next_cursor':rows[limit-1][0] if len(rows)>limit else None,'spent_notes_identifiable':False}
+    if method == 'zkn.shield.images':
+        rows=[] if not zs_exists(db,'zkn_shield_images') else db.execute('SELECT image,height,transaction_hash FROM zkn_shield_images WHERE image>? ORDER BY image LIMIT ?', (cursor, limit+1)).fetchall()
+        return {'images':[dict(zip(('image','height','transaction_hash'),r)) for r in rows[:limit]], 'next_cursor':rows[limit-1][0] if len(rows)>limit else None, 'spent_notes_identifiable':False}
     raise ValueError('unknown privacy query')
 
 """Native signed registration receipts and transferable block-snapshot ZKN assets."""
@@ -15271,8 +15629,8 @@ def zkc_edition_id(payload):
 
 def asset_signed_gift(tx, network, kind='zkn_private_transfer'):
     if (not isinstance(tx,dict) or set(tx)!={'type','data','timestamp','public_key','signature'} or
-            kind not in ({'zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
-            not isinstance(tx['data'],dict) or tx['data'].get('network_id')!=network or
+            kind not in ({'zkn_transfer','zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
+            not isinstance(tx['data'],dict) or (kind != 'zkn_transfer' and tx['data'].get('network_id')!=network) or
             not isinstance(tx['public_key'],str) or len(tx['public_key'])>1024 or
             not isinstance(tx['signature'],str) or len(tx['signature'])>160):
         fail('INVALID_ZKN','scoped signed private gift transaction required')
@@ -15302,6 +15660,54 @@ def asset_writable_database(path):
     return sqlite3.connect(Path(path).absolute().as_uri()+'?mode=rw',uri=True,timeout=5)
 
 
+def asset_privacy_pending(db, network, kind, value, sender):
+    """Reserve privacy conflicts under the caller's BEGIN IMMEDIATE lock.
+
+    Admission policy only: consensus validation must not depend on local mempool
+    contents, whose order and membership differ between validators.
+    """
+    own_requests = global_requests = 0
+    ownership = {'zkn_shield_deposit', 'zkn_transfer', 'zkn_private_transfer'}
+    kinds = sorted(ZS_TYPES | {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'})
+    rows = db.execute('SELECT type,data,public_key FROM transactions WHERE block_height IS NULL AND type IN (' + ','.join('?' for _ in kinds) + ') LIMIT 4097', kinds)
+    for pending_kind, raw, public in rows:
+        pending = strict_json(raw.encode())
+        if type(pending) is not dict: fail('PRIVACY_CONFLICT', 'pending privacy payload requires native recovery')
+        if pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and type(pending.get('proof')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy proof requires native recovery')
+        if pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and type(pending.get('note')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy note requires native recovery')
+        same_sender = hashlib.sha256(public.rstrip('\n').encode()).hexdigest() == sender
+        if kind in ownership | {'zkc_issue'} and pending_kind in ownership | {'zkc_issue'} and (kind in ownership or pending_kind in ownership) and pending.get('token_id') == value['token_id']:
+            fail('PRIVACY_CONFLICT', 'asset already has a pending ownership change')
+        if kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending.get('proof', {}).get('image') == value['proof']['image']:
+            fail('PRIVACY_CONFLICT', 'nullifier already pending')
+        if kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'}:
+            note = pending.get('note', {})
+            if any(note.get(field) == value['note'][field] for field in ('public_key', 'commitment')):
+                fail('PRIVACY_CONFLICT', 'one-time note key or commitment already pending')
+        if pending_kind == 'privacy_review_request':
+            global_requests += 1
+            own_requests += int(same_sender)
+            if kind == 'privacy_review_request' and same_sender and pending.get('nonce') == value['nonce']:
+                fail('PRIVACY_CONFLICT', 'request nonce already pending')
+        if value.get('request_id') and value.get('request_id') == pending.get('request_id'):
+            if kind == 'privacy_review_revoke' or pending_kind == 'privacy_review_revoke':
+                fail('PRIVACY_CONFLICT', 'review closure conflicts with a pending review action')
+            if kind == pending_kind == 'privacy_review_vote' and same_sender:
+                fail('PRIVACY_CONFLICT', 'review vote already pending')
+            if kind == pending_kind == 'privacy_review_disclose' and value['note_id'] == pending.get('note_id'):
+                fail('PRIVACY_CONFLICT', 'disclosure already pending')
+    if kind == 'privacy_review_request':
+        height = zs_height(db)
+        own_confirmed = global_confirmed = 0
+        if zs_exists(db, 'privacy_requests'):
+            own_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0]
+            global_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0', (height,)).fetchone()[0]
+        if own_confirmed + own_requests >= 8 or global_confirmed + global_requests >= 4096:
+            fail('PRIVACY_CONFLICT', 'confirmed and pending review request quota')
+
+
 def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
     tx,tx_hash,sender=asset_signed_gift(tx,network,kind)
     with closing(asset_writable_database(root/'var/lib/corix/networks'/network/'blockchain/chain.db')) as db:
@@ -15312,15 +15718,11 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
             if old:
                 if tuple(old)!=expected: fail('IDEMPOTENCY_CONFLICT','gift transaction bytes changed')
             else:
+                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
+                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 asset_validate(db,network,tx['type'],tx['data'],sender)
-                if kind in ZS_TYPES:
-                    for raw,public in db.execute('SELECT data,public_key FROM transactions WHERE block_height IS NULL LIMIT 4097'):
-                        pending=strict_json(raw.encode())
-                        if not isinstance(pending,dict):continue
-                        if isinstance(pending.get('proof'),dict) and pending['proof'].get('image')==tx['data'].get('proof',{}).get('image') and 'proof' in tx['data']:fail('PRIVACY_CONFLICT','nullifier already pending')
-                        same_sender=hashlib.sha256(public.rstrip('\n').encode()).hexdigest()==sender
-                        if kind=='privacy_review_request' and same_sender and pending.get('nonce')==tx['data']['nonce']:fail('PRIVACY_CONFLICT','request nonce already pending')
-                        if kind=='privacy_review_vote' and same_sender and pending.get('request_id')==tx['data']['request_id'] and 'decision' in pending:fail('PRIVACY_CONFLICT','review vote already pending')
+                if kind in ZS_TYPES or kind in {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'}:
+                    asset_privacy_pending(db, network, kind, tx['data'], sender)
                 for (raw,) in db.execute("SELECT data FROM transactions WHERE type IN ('zkn_transfer','zkn_private_transfer','zkc_issue') AND block_height IS NULL LIMIT 4097"):
                     pending=strict_json(raw.encode())
                     if kind=='zkn_private_transfer' and 'nonce' in pending and pending.get('token_id')==tx['data']['token_id'] and pending.get('nonce')==tx['data']['nonce']:
@@ -15329,8 +15731,6 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
                         fail('RECIPIENT_REUSED','one-time receiver already has a pending gift')
                     if kind=='zkc_issue' and 'kind' in pending and zkc_edition_id(pending)==zkc_edition_id(tx['data']):
                         fail('EDITION_PENDING','edition already has a pending issue; reuse its transaction')
-                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
-                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 db.execute('INSERT INTO transactions (hash,type,data,signature,public_key,timestamp,block_height) VALUES (?,?,?,?,?,?,NULL)',(tx_hash,*expected))
             db.commit()
         except BaseException: db.rollback();raise
@@ -15478,6 +15878,16 @@ def asset_apply(db, network, tx_hash, tx_type, payload, sender, height):
 def asset_engine_main(args):
     action,db_path,network=args[0],Path(args[1]).absolute(),args[2]
     identifier(network,'network')
+    if action == 'submit-asset':
+        root = Path(args[3]).absolute()
+        if db_path != root/'var/lib/corix/networks'/network/'blockchain/chain.db':
+            fail('SCOPE_MISMATCH', 'native privacy database belongs to another root')
+        tx = strict_json(args[4].encode())
+        if type(tx) is not dict or tx.get('type') not in ZS_TYPES | {'zkn_transfer','zkn_private_transfer','zkc_issue'}:
+            fail('INVALID_PARAMS', 'admitted native asset transaction required')
+        result = asset_submit_gift(root, network, tx, tx['type'])
+        print(result['transaction_hash'])
+        return 0
     if action=='forward':
         root=Path(args[3]).absolute()
         asset_forward_pending(root,network)
@@ -16199,7 +16609,7 @@ MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
-           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes")
+           "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
 class ProtocolError(ValueError):
@@ -16622,7 +17032,7 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -16868,7 +17278,7 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
-        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes'}:
+        elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
                 with closing(corium_db(root,network,'blockchain/chain.db')) as db:result=zs_query(db,network,method,request['params'])
@@ -17955,6 +18365,17 @@ ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
 _ZS_ZERO = bytes(32)
 _ZS_ORDER = 2**252 + 27742317777372353535851937790883648493
 _ZS_LIB = None
+_ZS_OPS = {
+    'crypto_core_ristretto255_from_hash': ((64,), True),
+    'crypto_core_ristretto255_scalar_reduce': ((64,), False),
+    'crypto_scalarmult_ristretto255': ((32, 32), True),
+    'crypto_scalarmult_ristretto255_base': ((32,), True),
+    'crypto_core_ristretto255_add': ((32, 32), True),
+    'crypto_core_ristretto255_sub': ((32, 32), True),
+    'crypto_core_ristretto255_scalar_mul': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_add': ((32, 32), False),
+    'crypto_core_ristretto255_scalar_sub': ((32, 32), False),
+}
 
 
 def zs_json(value):
@@ -17993,24 +18414,31 @@ def zs_lib():
             try:lib=_zs_ct.CDLL(name);break
             except OSError:continue
         if lib is None:raise ValueError('libsodium Ristretto255 unavailable')
+        lib.sodium_init.argtypes = []
+        lib.sodium_init.restype = _zs_ct.c_int
         if lib.sodium_init() < 0: raise ValueError('libsodium initialization failed')
-        for function in ('crypto_core_ristretto255_is_valid_point', 'crypto_core_ristretto255_from_hash',
-                         'crypto_core_ristretto255_scalar_reduce', 'crypto_scalarmult_ristretto255',
-                         'crypto_scalarmult_ristretto255_base', 'crypto_core_ristretto255_add',
-                         'crypto_core_ristretto255_sub', 'crypto_core_ristretto255_scalar_mul',
-                         'crypto_core_ristretto255_scalar_add', 'crypto_core_ristretto255_scalar_sub'):
-            getattr(lib, function).restype = _zs_ct.c_int
+        for function, (sizes, status) in _ZS_OPS.items():
+            fn = getattr(lib, function)
+            fn.argtypes = [_zs_ct.c_void_p] * (len(sizes) + 1)
+            fn.restype = _zs_ct.c_int if status else None
+        lib.crypto_core_ristretto255_is_valid_point.argtypes = [_zs_ct.c_void_p]
+        lib.crypto_core_ristretto255_is_valid_point.restype = _zs_ct.c_int
         _ZS_LIB = lib
     return _ZS_LIB
 
 
 def zs_op(name, *values):
+    contract = _ZS_OPS.get(name)
+    if contract is None or len(values) != len(contract[0]) or any(type(v) is not bytes or len(v) != size for v, size in zip(values, contract[0])):
+        raise ValueError('Ristretto exact operation and buffer sizes required')
+    if '_scalar_' in name and not name.endswith('_reduce'):
+        for value in values: zs_scalar(value)
+    elif name.startswith('crypto_scalarmult_'):
+        zs_scalar(values[0])
     output = _zs_ct.create_string_buffer(32)
     fn = getattr(zs_lib(), name)
-    # Scalar operations/from_hash return void; only point operations have status.
     status = fn(output, *(_zs_ct.create_string_buffer(v, len(v)) for v in values))
-    if name in {'crypto_scalarmult_ristretto255', 'crypto_scalarmult_ristretto255_base',
-                'crypto_core_ristretto255_add', 'crypto_core_ristretto255_sub'} and status != 0:
+    if contract[1] and status != 0:
         raise ValueError('Ristretto operation rejected')
     return output.raw
 
@@ -18030,7 +18458,11 @@ def zs_point(value):
 
 
 def zs_reduce(raw): return zs_op('crypto_core_ristretto255_scalar_reduce', raw)
-def zs_random_scalar(): return zs_reduce(_zs_random.token_bytes(64))
+def zs_random_scalar():
+    for _ in range(8):
+        value = zs_reduce(_zs_random.token_bytes(64))
+        if value != _ZS_ZERO: return value
+    raise ValueError('nonzero scalar randomness unavailable')
 def zs_sadd(a, b): return zs_op('crypto_core_ristretto255_scalar_add', a, b)
 def zs_ssub(a, b): return zs_op('crypto_core_ristretto255_scalar_sub', a, b)
 def zs_smul(a, b): return zs_op('crypto_core_ristretto255_scalar_mul', a, b)
@@ -18146,6 +18578,8 @@ def zs_validate(db, network, kind, value, sender):
         else:
             if type(value['ring']) is not list or len(value['ring']) not in (16, 32, 64) or len(set(value['ring'])) != len(value['ring']) or value['ring'] != sorted(value['ring']): raise ValueError('unique canonical fixed ring required')
             zs_hex(value['anchor'])
+            if not zs_exists(db, 'zkn_shield_notes') or not zs_exists(db, 'zkn_shield_images'):
+                raise ValueError('shielded pool not initialized')
             anchor = db.execute('SELECT height FROM blocks WHERE hash=?', (value['anchor'],)).fetchone()
             if not anchor or not 1 <= zs_height(db)-anchor[0] <= 128: raise ValueError('mature canonical anchor required')
             ring = []
@@ -18176,6 +18610,9 @@ def zs_validate(db, network, kind, value, sender):
         if zs_exists(db, 'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0] >= 8: raise ValueError('review request quota')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT 1 FROM privacy_requests WHERE requester=? AND nonce=?',(sender,value['nonce'])).fetchone(): raise ValueError('review request replay')
         if zs_exists(db,'privacy_requests') and db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0',(height,)).fetchone()[0]>=4096: raise ValueError('global review request quota')
+        electorate=db.execute("SELECT stake FROM validators WHERE status='active' AND stake>0 LIMIT 1025").fetchall()
+        if not 1 <= len(electorate) <= 1024 or any(type(weight) is not int or not 0 < weight < 2**53 for (weight,) in electorate):
+            raise ValueError('bounded active validator electorate required')
         return
     if value.get('network_id')!=network:raise ValueError('review network mismatch')
     fields = {'request_id', 'decision'} if kind == 'privacy_review_vote' else {'request_id'} if kind == 'privacy_review_revoke' else {'request_id', 'note_id', 'ciphertext', 'authorization'}
@@ -18273,6 +18710,9 @@ def zs_query(db, network, method, params):
     if method == 'zkn.shield.notes':
         rows=[] if not zs_exists(db,'zkn_shield_notes') else db.execute('SELECT note_id,public_key,commitment,ciphertext,height FROM zkn_shield_notes WHERE note_id>? ORDER BY note_id LIMIT ?',(cursor,limit+1)).fetchall()
         return {'notes':[dict(zip(('note_id','public_key','commitment','ciphertext','height'),r)) for r in rows[:limit]],'next_cursor':rows[limit-1][0] if len(rows)>limit else None,'spent_notes_identifiable':False}
+    if method == 'zkn.shield.images':
+        rows=[] if not zs_exists(db,'zkn_shield_images') else db.execute('SELECT image,height,transaction_hash FROM zkn_shield_images WHERE image>? ORDER BY image LIMIT ?', (cursor, limit+1)).fetchall()
+        return {'images':[dict(zip(('image','height','transaction_hash'),r)) for r in rows[:limit]], 'next_cursor':rows[limit-1][0] if len(rows)>limit else None, 'spent_notes_identifiable':False}
     raise ValueError('unknown privacy query')
 
 """Native signed registration receipts and transferable block-snapshot ZKN assets."""
@@ -18306,8 +18746,8 @@ def zkc_edition_id(payload):
 
 def asset_signed_gift(tx, network, kind='zkn_private_transfer'):
     if (not isinstance(tx,dict) or set(tx)!={'type','data','timestamp','public_key','signature'} or
-            kind not in ({'zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
-            not isinstance(tx['data'],dict) or tx['data'].get('network_id')!=network or
+            kind not in ({'zkn_transfer','zkn_private_transfer','zkc_issue'}|ZS_TYPES) or tx['type']!=kind or type(tx['timestamp']) is not int or not 0<tx['timestamp']<2**53 or
+            not isinstance(tx['data'],dict) or (kind != 'zkn_transfer' and tx['data'].get('network_id')!=network) or
             not isinstance(tx['public_key'],str) or len(tx['public_key'])>1024 or
             not isinstance(tx['signature'],str) or len(tx['signature'])>160):
         fail('INVALID_ZKN','scoped signed private gift transaction required')
@@ -18337,6 +18777,54 @@ def asset_writable_database(path):
     return sqlite3.connect(Path(path).absolute().as_uri()+'?mode=rw',uri=True,timeout=5)
 
 
+def asset_privacy_pending(db, network, kind, value, sender):
+    """Reserve privacy conflicts under the caller's BEGIN IMMEDIATE lock.
+
+    Admission policy only: consensus validation must not depend on local mempool
+    contents, whose order and membership differ between validators.
+    """
+    own_requests = global_requests = 0
+    ownership = {'zkn_shield_deposit', 'zkn_transfer', 'zkn_private_transfer'}
+    kinds = sorted(ZS_TYPES | {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'})
+    rows = db.execute('SELECT type,data,public_key FROM transactions WHERE block_height IS NULL AND type IN (' + ','.join('?' for _ in kinds) + ') LIMIT 4097', kinds)
+    for pending_kind, raw, public in rows:
+        pending = strict_json(raw.encode())
+        if type(pending) is not dict: fail('PRIVACY_CONFLICT', 'pending privacy payload requires native recovery')
+        if pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and type(pending.get('proof')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy proof requires native recovery')
+        if pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and type(pending.get('note')) is not dict:
+            fail('PRIVACY_CONFLICT', 'pending privacy note requires native recovery')
+        same_sender = hashlib.sha256(public.rstrip('\n').encode()).hexdigest() == sender
+        if kind in ownership | {'zkc_issue'} and pending_kind in ownership | {'zkc_issue'} and (kind in ownership or pending_kind in ownership) and pending.get('token_id') == value['token_id']:
+            fail('PRIVACY_CONFLICT', 'asset already has a pending ownership change')
+        if kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending_kind in {'zkn_shield_transfer', 'zkn_shield_withdraw'} and pending.get('proof', {}).get('image') == value['proof']['image']:
+            fail('PRIVACY_CONFLICT', 'nullifier already pending')
+        if kind in {'zkn_shield_deposit', 'zkn_shield_transfer'} and pending_kind in {'zkn_shield_deposit', 'zkn_shield_transfer'}:
+            note = pending.get('note', {})
+            if any(note.get(field) == value['note'][field] for field in ('public_key', 'commitment')):
+                fail('PRIVACY_CONFLICT', 'one-time note key or commitment already pending')
+        if pending_kind == 'privacy_review_request':
+            global_requests += 1
+            own_requests += int(same_sender)
+            if kind == 'privacy_review_request' and same_sender and pending.get('nonce') == value['nonce']:
+                fail('PRIVACY_CONFLICT', 'request nonce already pending')
+        if value.get('request_id') and value.get('request_id') == pending.get('request_id'):
+            if kind == 'privacy_review_revoke' or pending_kind == 'privacy_review_revoke':
+                fail('PRIVACY_CONFLICT', 'review closure conflicts with a pending review action')
+            if kind == pending_kind == 'privacy_review_vote' and same_sender:
+                fail('PRIVACY_CONFLICT', 'review vote already pending')
+            if kind == pending_kind == 'privacy_review_disclose' and value['note_id'] == pending.get('note_id'):
+                fail('PRIVACY_CONFLICT', 'disclosure already pending')
+    if kind == 'privacy_review_request':
+        height = zs_height(db)
+        own_confirmed = global_confirmed = 0
+        if zs_exists(db, 'privacy_requests'):
+            own_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE requester=? AND expires>=? AND revoked=0', (sender, height)).fetchone()[0]
+            global_confirmed = db.execute('SELECT COUNT(*) FROM privacy_requests WHERE expires>=? AND revoked=0', (height,)).fetchone()[0]
+        if own_confirmed + own_requests >= 8 or global_confirmed + global_requests >= 4096:
+            fail('PRIVACY_CONFLICT', 'confirmed and pending review request quota')
+
+
 def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
     tx,tx_hash,sender=asset_signed_gift(tx,network,kind)
     with closing(asset_writable_database(root/'var/lib/corix/networks'/network/'blockchain/chain.db')) as db:
@@ -18347,15 +18835,11 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
             if old:
                 if tuple(old)!=expected: fail('IDEMPOTENCY_CONFLICT','gift transaction bytes changed')
             else:
+                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
+                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 asset_validate(db,network,tx['type'],tx['data'],sender)
-                if kind in ZS_TYPES:
-                    for raw,public in db.execute('SELECT data,public_key FROM transactions WHERE block_height IS NULL LIMIT 4097'):
-                        pending=strict_json(raw.encode())
-                        if not isinstance(pending,dict):continue
-                        if isinstance(pending.get('proof'),dict) and pending['proof'].get('image')==tx['data'].get('proof',{}).get('image') and 'proof' in tx['data']:fail('PRIVACY_CONFLICT','nullifier already pending')
-                        same_sender=hashlib.sha256(public.rstrip('\n').encode()).hexdigest()==sender
-                        if kind=='privacy_review_request' and same_sender and pending.get('nonce')==tx['data']['nonce']:fail('PRIVACY_CONFLICT','request nonce already pending')
-                        if kind=='privacy_review_vote' and same_sender and pending.get('request_id')==tx['data']['request_id'] and 'decision' in pending:fail('PRIVACY_CONFLICT','review vote already pending')
+                if kind in ZS_TYPES or kind in {'zkn_transfer', 'zkn_private_transfer', 'zkc_issue'}:
+                    asset_privacy_pending(db, network, kind, tx['data'], sender)
                 for (raw,) in db.execute("SELECT data FROM transactions WHERE type IN ('zkn_transfer','zkn_private_transfer','zkc_issue') AND block_height IS NULL LIMIT 4097"):
                     pending=strict_json(raw.encode())
                     if kind=='zkn_private_transfer' and 'nonce' in pending and pending.get('token_id')==tx['data']['token_id'] and pending.get('nonce')==tx['data']['nonce']:
@@ -18364,8 +18848,6 @@ def asset_submit_gift(root, network, tx, kind='zkn_private_transfer'):
                         fail('RECIPIENT_REUSED','one-time receiver already has a pending gift')
                     if kind=='zkc_issue' and 'kind' in pending and zkc_edition_id(pending)==zkc_edition_id(tx['data']):
                         fail('EDITION_PENDING','edition already has a pending issue; reuse its transaction')
-                if db.execute('SELECT COUNT(*) FROM transactions WHERE block_height IS NULL').fetchone()[0]>=4096:
-                    fail('BACKPRESSURE','pending transaction budget exhausted')
                 db.execute('INSERT INTO transactions (hash,type,data,signature,public_key,timestamp,block_height) VALUES (?,?,?,?,?,?,NULL)',(tx_hash,*expected))
             db.commit()
         except BaseException: db.rollback();raise
@@ -18513,6 +18995,16 @@ def asset_apply(db, network, tx_hash, tx_type, payload, sender, height):
 def asset_engine_main(args):
     action,db_path,network=args[0],Path(args[1]).absolute(),args[2]
     identifier(network,'network')
+    if action == 'submit-asset':
+        root = Path(args[3]).absolute()
+        if db_path != root/'var/lib/corix/networks'/network/'blockchain/chain.db':
+            fail('SCOPE_MISMATCH', 'native privacy database belongs to another root')
+        tx = strict_json(args[4].encode())
+        if type(tx) is not dict or tx.get('type') not in ZS_TYPES | {'zkn_transfer','zkn_private_transfer','zkc_issue'}:
+            fail('INVALID_PARAMS', 'admitted native asset transaction required')
+        result = asset_submit_gift(root, network, tx, tx['type'])
+        print(result['transaction_hash'])
+        return 0
     if action=='forward':
         root=Path(args[3]).absolute()
         asset_forward_pending(root,network)
@@ -26315,7 +26807,7 @@ blockchain_create_transaction() {
     [[ "$tx_type" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ ]] || return 1
     tx_data=$(jq -ce 'select(type == "object")' <<< "$tx_data") || return 1
     case "$tx_type" in
-        zkn_shield_*|privacy_review_*) tx_data=$(jq -cS . <<< "$tx_data") || return 1 ;;
+        zkn_shield_*|privacy_review_*|zkn_transfer|zkn_private_transfer|zkc_issue) tx_data=$(jq -cS . <<< "$tx_data") || return 1 ;;
     esac
     local timestamp public_key
     timestamp=$(date +%s)
@@ -26329,6 +26821,16 @@ blockchain_create_transaction() {
     tx_hash=$(_internal_hash_text "$data_to_verify")
     signature=$(sign_data "$data_to_verify" "$USER_IDENTITY_FILE")
     
+    # Native signed assets use the same atomic admission as MCP/native plans.
+    case "$tx_type" in
+        zkn_shield_*|privacy_review_*|zkn_transfer|zkn_private_transfer|zkc_issue)
+            local privacy_tx
+            privacy_tx=$(jq -cn --arg type "$tx_type" --argjson data "$tx_data" --argjson ts "$timestamp" --arg pk "$public_key" --arg sig "$signature" '{type:$type,data:$data,timestamp:$ts,public_key:$pk,signature:$sig}') || return 1
+            _ziokt_asset_engine submit-asset "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$CORIUM_ROOT" "$privacy_tx" || return 1
+            return 0
+            ;;
+    esac
+
     # Store the complete transaction details in the local database.
     # It is initially "pending" (block_height is NULL).
     # 将完整的交易详情存入本地数据库。
