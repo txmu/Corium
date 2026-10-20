@@ -36905,6 +36905,14 @@ def main():
     sandbox_globals = safe_globals.copy()
     safe_builtins = sandbox_globals.get('__builtins__', {}).copy()
     safe_builtins['__import__'] = safe_import
+    safe_builtins['list'] = list
+    safe_builtins['dict'] = dict
+    safe_builtins['set'] = set
+    safe_builtins['tuple'] = tuple
+    safe_builtins['str'] = str
+    safe_builtins['int'] = int
+    safe_builtins['float'] = float
+    safe_builtins['bool'] = bool
     sandbox_globals['__builtins__'] = safe_builtins
 
     import operator
@@ -36927,6 +36935,7 @@ def main():
         'hmac': hmac,
         'any': any, 'all': all, 'min': min, 'max': max, 'sum': sum, 'sorted': sorted,
         'enumerate': enumerate, 'zip': zip, 'reversed': reversed,
+        'list': list, 'dict': dict, 'set': set, 'tuple': tuple,
         '_getitem_': default_guarded_getitem,
         '_getiter_': default_guarded_getiter,
         '_getattr_': safer_getattr,
