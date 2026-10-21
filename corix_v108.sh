@@ -142,7 +142,7 @@ MAX_RESPONSE = 262_144
 MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
+METHODS = ("capabilities.get", "status.get", "health.challenge", "objects.list", "operation.prepare",
            "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
@@ -566,7 +566,11 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
+    if method == "health.challenge":
+        if (set(params)!={"challenge"} or not isinstance(params["challenge"],str) or
+                not re.fullmatch(r"[0-9a-f]{32}",params["challenge"])):
+            fail("INVALID_PARAMS", "fresh bounded health challenge required")
+    elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -804,6 +808,21 @@ def status(provider, config, network):
             "listener_scope": "local-rpc-process", "recovery": "explicit-native-operation"}
 
 
+def health_challenge(provider, config, challenge):
+    """Prove a fresh request reached this pinned native provider process.
+
+    This deliberately reports application and external network readiness as
+    unassessed; a provider challenge cannot stand in for an end-to-end service
+    operation or a peer acknowledgement.
+    """
+    return {"schema":"ziokt.provider-health.v1","challenge":challenge,
+            "native_project":provider,"provider_id":config["provider_id"],
+            "federation_id":config["federation_id"],"enabled":config["enabled"],
+            "observed_at_ms":time.time_ns()//1_000_000,
+            "checks":{"pinned_process_rpc":"passed","application_runtime":"not_assessed",
+                      "external_peer":"not_assessed"}}
+
+
 def rpc(provider, root, network, config, stream):
     request_id = None
     try:
@@ -821,6 +840,8 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
+        elif method == "health.challenge":
+            result = health_challenge(provider, config, request["params"]["challenge"])
         elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
@@ -3675,7 +3696,7 @@ MAX_RESPONSE = 262_144
 MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
+METHODS = ("capabilities.get", "status.get", "health.challenge", "objects.list", "operation.prepare",
            "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
@@ -4099,7 +4120,11 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
+    if method == "health.challenge":
+        if (set(params)!={"challenge"} or not isinstance(params["challenge"],str) or
+                not re.fullmatch(r"[0-9a-f]{32}",params["challenge"])):
+            fail("INVALID_PARAMS", "fresh bounded health challenge required")
+    elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -4337,6 +4362,21 @@ def status(provider, config, network):
             "listener_scope": "local-rpc-process", "recovery": "explicit-native-operation"}
 
 
+def health_challenge(provider, config, challenge):
+    """Prove a fresh request reached this pinned native provider process.
+
+    This deliberately reports application and external network readiness as
+    unassessed; a provider challenge cannot stand in for an end-to-end service
+    operation or a peer acknowledgement.
+    """
+    return {"schema":"ziokt.provider-health.v1","challenge":challenge,
+            "native_project":provider,"provider_id":config["provider_id"],
+            "federation_id":config["federation_id"],"enabled":config["enabled"],
+            "observed_at_ms":time.time_ns()//1_000_000,
+            "checks":{"pinned_process_rpc":"passed","application_runtime":"not_assessed",
+                      "external_peer":"not_assessed"}}
+
+
 def rpc(provider, root, network, config, stream):
     request_id = None
     try:
@@ -4354,6 +4394,8 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
+        elif method == "health.challenge":
+            result = health_challenge(provider, config, request["params"]["challenge"])
         elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
@@ -7216,7 +7258,7 @@ MAX_RESPONSE = 262_144
 MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
+METHODS = ("capabilities.get", "status.get", "health.challenge", "objects.list", "operation.prepare",
            "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
@@ -7640,7 +7682,11 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
+    if method == "health.challenge":
+        if (set(params)!={"challenge"} or not isinstance(params["challenge"],str) or
+                not re.fullmatch(r"[0-9a-f]{32}",params["challenge"])):
+            fail("INVALID_PARAMS", "fresh bounded health challenge required")
+    elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -7878,6 +7924,21 @@ def status(provider, config, network):
             "listener_scope": "local-rpc-process", "recovery": "explicit-native-operation"}
 
 
+def health_challenge(provider, config, challenge):
+    """Prove a fresh request reached this pinned native provider process.
+
+    This deliberately reports application and external network readiness as
+    unassessed; a provider challenge cannot stand in for an end-to-end service
+    operation or a peer acknowledgement.
+    """
+    return {"schema":"ziokt.provider-health.v1","challenge":challenge,
+            "native_project":provider,"provider_id":config["provider_id"],
+            "federation_id":config["federation_id"],"enabled":config["enabled"],
+            "observed_at_ms":time.time_ns()//1_000_000,
+            "checks":{"pinned_process_rpc":"passed","application_runtime":"not_assessed",
+                      "external_peer":"not_assessed"}}
+
+
 def rpc(provider, root, network, config, stream):
     request_id = None
     try:
@@ -7895,6 +7956,8 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
+        elif method == "health.challenge":
+            result = health_challenge(provider, config, request["params"]["challenge"])
         elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
@@ -10401,7 +10464,7 @@ MAX_RESPONSE = 262_144
 MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
+METHODS = ("capabilities.get", "status.get", "health.challenge", "objects.list", "operation.prepare",
            "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
@@ -10825,7 +10888,11 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
+    if method == "health.challenge":
+        if (set(params)!={"challenge"} or not isinstance(params["challenge"],str) or
+                not re.fullmatch(r"[0-9a-f]{32}",params["challenge"])):
+            fail("INVALID_PARAMS", "fresh bounded health challenge required")
+    elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -11063,6 +11130,21 @@ def status(provider, config, network):
             "listener_scope": "local-rpc-process", "recovery": "explicit-native-operation"}
 
 
+def health_challenge(provider, config, challenge):
+    """Prove a fresh request reached this pinned native provider process.
+
+    This deliberately reports application and external network readiness as
+    unassessed; a provider challenge cannot stand in for an end-to-end service
+    operation or a peer acknowledgement.
+    """
+    return {"schema":"ziokt.provider-health.v1","challenge":challenge,
+            "native_project":provider,"provider_id":config["provider_id"],
+            "federation_id":config["federation_id"],"enabled":config["enabled"],
+            "observed_at_ms":time.time_ns()//1_000_000,
+            "checks":{"pinned_process_rpc":"passed","application_runtime":"not_assessed",
+                      "external_peer":"not_assessed"}}
+
+
 def rpc(provider, root, network, config, stream):
     request_id = None
     try:
@@ -11080,6 +11162,8 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
+        elif method == "health.challenge":
+            result = health_challenge(provider, config, request["params"]["challenge"])
         elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
@@ -13527,7 +13611,7 @@ MAX_RESPONSE = 262_144
 MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
+METHODS = ("capabilities.get", "status.get", "health.challenge", "objects.list", "operation.prepare",
            "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
@@ -13951,7 +14035,11 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
+    if method == "health.challenge":
+        if (set(params)!={"challenge"} or not isinstance(params["challenge"],str) or
+                not re.fullmatch(r"[0-9a-f]{32}",params["challenge"])):
+            fail("INVALID_PARAMS", "fresh bounded health challenge required")
+    elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -14189,6 +14277,21 @@ def status(provider, config, network):
             "listener_scope": "local-rpc-process", "recovery": "explicit-native-operation"}
 
 
+def health_challenge(provider, config, challenge):
+    """Prove a fresh request reached this pinned native provider process.
+
+    This deliberately reports application and external network readiness as
+    unassessed; a provider challenge cannot stand in for an end-to-end service
+    operation or a peer acknowledgement.
+    """
+    return {"schema":"ziokt.provider-health.v1","challenge":challenge,
+            "native_project":provider,"provider_id":config["provider_id"],
+            "federation_id":config["federation_id"],"enabled":config["enabled"],
+            "observed_at_ms":time.time_ns()//1_000_000,
+            "checks":{"pinned_process_rpc":"passed","application_runtime":"not_assessed",
+                      "external_peer":"not_assessed"}}
+
+
 def rpc(provider, root, network, config, stream):
     request_id = None
     try:
@@ -14206,6 +14309,8 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
+        elif method == "health.challenge":
+            result = health_challenge(provider, config, request["params"]["challenge"])
         elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
@@ -16653,7 +16758,7 @@ MAX_RESPONSE = 262_144
 MAX_CONFIG = 262_144
 MAX_OBJECTS = 4096
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-METHODS = ("capabilities.get", "status.get", "objects.list", "operation.prepare",
+METHODS = ("capabilities.get", "status.get", "health.challenge", "objects.list", "operation.prepare",
            "operation.commit", "operation.abort", "operation.status", "operation.reconcile", "events.list", "content.get", "governance.fact", "zkt.status", "zkt.account", "identity.fact", "zkn.list", "zkn.fact", "zkc.list", "zkc.fact", "service.binding", "compute.challenge", "privacy.status", "privacy.review.list", "privacy.review.get", "zkn.shield.notes", "zkn.shield.images")
 
 
@@ -17077,7 +17182,11 @@ def validate_request(value, config):
         fail("METHOD_UNSUPPORTED", "operation not available in this native profile")
     params = value["params"]
     method = value["method"]
-    if method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
+    if method == "health.challenge":
+        if (set(params)!={"challenge"} or not isinstance(params["challenge"],str) or
+                not re.fullmatch(r"[0-9a-f]{32}",params["challenge"])):
+            fail("INVALID_PARAMS", "fresh bounded health challenge required")
+    elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
         allowed=set() if method=='privacy.status' else {'request_id'} if method=='privacy.review.get' else {'limit','cursor'}
         if set(params)-allowed or (method=='privacy.review.get' and set(params)!=allowed):fail('INVALID_PARAMS','exact privacy query required')
         if 'request_id' in params:
@@ -17315,6 +17424,21 @@ def status(provider, config, network):
             "listener_scope": "local-rpc-process", "recovery": "explicit-native-operation"}
 
 
+def health_challenge(provider, config, challenge):
+    """Prove a fresh request reached this pinned native provider process.
+
+    This deliberately reports application and external network readiness as
+    unassessed; a provider challenge cannot stand in for an end-to-end service
+    operation or a peer acknowledgement.
+    """
+    return {"schema":"ziokt.provider-health.v1","challenge":challenge,
+            "native_project":provider,"provider_id":config["provider_id"],
+            "federation_id":config["federation_id"],"enabled":config["enabled"],
+            "observed_at_ms":time.time_ns()//1_000_000,
+            "checks":{"pinned_process_rpc":"passed","application_runtime":"not_assessed",
+                      "external_peer":"not_assessed"}}
+
+
 def rpc(provider, root, network, config, stream):
     request_id = None
     try:
@@ -17332,6 +17456,8 @@ def rpc(provider, root, network, config, stream):
             result = capabilities(provider, config)
         elif method == "status.get":
             result = status(provider, config, network)
+        elif method == "health.challenge":
+            result = health_challenge(provider, config, request["params"]["challenge"])
         elif method in {'privacy.status','privacy.review.list','privacy.review.get','zkn.shield.notes','zkn.shield.images'}:
             if provider!='corium':fail('METHOD_UNSUPPORTED','privacy consensus belongs to Corium')
             try:
