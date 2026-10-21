@@ -39,3 +39,33 @@ engine governance; a successful SHA-256 nonce is not an OpenCI contribution.
 The adapter currently rejects other proof schemas. Android relay contributions
 require separately verified service receipts and cannot be represented by
 invented compile proof data.
+
+## Native candidate binding v2
+
+`work_weight_native.py` adds canonical, explicitly versioned work-block bytes.
+The header binds the network, policy commitment, native parent, exact next
+height, timestamp, ordered transaction hashes and canonical secp256k1 miner
+public key. The work predicate commits to that entire header. The native
+signature additionally binds the exact nonce/proof, preventing substitution
+of another valid nonce under an existing signature. Hashing excludes signature
+encoding so a different ECDSA encoding cannot create another block identity.
+
+`inspect_database` reads the actual native genesis and parent weight in a
+query-only SQLite transaction. Remote candidate fields cannot invent their own
+parent total weight. Input limits include 200 transaction hashes, bounded
+integers, canonical keys, exact fields and bounded mining attempts.
+
+Owner-local read-only inspection:
+
+```sh
+python3 work_weight_native.py --database /OWNER/NATIVE/chain.db \
+  --policy reviewed-policy.json --block candidate.json --network NETWORK
+```
+
+This verifies actual candidate work, header hash, native signature and parent
+linkage. It does **not** validate transactions, establish governance approval,
+grant proposal eligibility, accept a block, alter fork choice or reach finality.
+The output explicitly preserves these separate states. Existing v108 blocks
+and the mainnet consensus remain unchanged. The six native-parent tests include
+real native transaction validation, original PoS mining and observing its parent
+weight; they must not be called v2 consensus activation or multi-node acceptance.
