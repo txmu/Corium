@@ -26287,7 +26287,9 @@ PY_ENGINE_ZERO
             fi
 
             # [Batch 4] 防御恶意 Compute Engine/Verifier 篡改
-            if [[ "$engine_id" != "corium/internal-engine-zero"* ]]; then
+            # Only the exact versioned built-in identifier bypasses registration.
+            # Prefix lookalikes must pass normal active-engine/hash validation.
+            if [[ "$engine_id" != "corium/internal-engine-zero-v1" ]]; then
                 local onchain_engine_hash onchain_verifier_hash proof_engine_hash proof_verifier_hash
                 onchain_engine_hash=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT compute_program_hash FROM compute_engines WHERE engine_id = %s AND is_active = 1;" "$engine_id")
                 onchain_verifier_hash=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT verifier_script_hash FROM compute_engines WHERE engine_id = %s AND is_active = 1;" "$engine_id")
@@ -40140,11 +40142,14 @@ _resolve_proofs_and_challenges_at_height() {
         "SELECT C.challenger_id, P.proposer_id, C.challenge_tx_hash, C.target_proof_tx_hash, C.challenge_data, P.problem_id, P.proposed_result FROM challenges AS C JOIN pending_proofs AS P ON C.target_proof_tx_hash = P.proof_tx_hash WHERE C.status = 'pending';" | while IFS='|' read -r challenger_id proposer_id challenge_tx target_tx challenge_data problem_id proposed_result; do
         
         local engine_id
-        engine_id=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT engine_id FROM problem_sets WHERE set_id = %s;" "$problem_id") # 假设 problem_id 就是 set_id
+        # The signed proof selects its engine. A challenge may be a block hash,
+        # not a problem_sets key; never guess the engine from that key.
+        engine_id=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT json_extract(data, '$.engine_id') FROM transactions WHERE hash = %s AND type = 'submit_math_proof';" "$target_tx") || return 1
+        [ -n "$engine_id" ] || return 1
         
         local challenge_succeeded=1
         
-        if [[ "$engine_id" == "corium/internal-engine-zero"* ]]; then
+        if [[ "$engine_id" == "corium/internal-engine-zero-v1" ]]; then
             # [Batch 4] Engine Zero 内部验证逻辑 (包含跨链重放防御)
             # proposed_result 包含 JSON
             local nonce network_id submitter_id target_hash
