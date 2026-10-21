@@ -42953,14 +42953,18 @@ _internal_governance_propose_engine() {
             "reward_weight": $weight
         }')
 
-    local tx_hash
-    tx_hash=$(blockchain_create_transaction "propose_new_compute_engine" "$tx_data")
-
-    if [[ -n "$tx_hash" ]]; then
-        _apply_theme "success" "✅ 提案已成功提交！ / Proposal submitted successfully!"
+    local tx_hash tx_output
+    if ! tx_output=$(blockchain_create_transaction "propose_new_compute_engine" "$tx_data"); then
+        error "原生交易提交失败，请检查本地待处理状态后重试。 / Native submission failed; inspect local pending state before retry."
+        return 1
+    fi
+    tx_hash="${tx_output##*$'\n'}"
+    if [[ "$tx_hash" =~ ^[a-f0-9]{64}$ ]]; then
+        _apply_theme "success" "提案已在本地保存，等待原生共识确认。 / Proposal stored locally; native consensus confirmation pending."
         _apply_theme "info" "  交易哈希 / Transaction Hash: ${tx_hash}"
     else
         error "提交提案失败。 / Failed to submit proposal."
+        return 1
     fi
 }
 
@@ -42981,14 +42985,18 @@ _internal_governance_vote_engine() {
 
     info "正在为提案 ${proposal_hash:0:16} 投出赞成票... / Casting 'yes' vote for proposal ${proposal_hash:0:16}..."
     
-    local tx_hash
-    tx_hash=$(blockchain_create_transaction "$vote_tx_type" "$tx_data")
-
-    if [[ -n "$tx_hash" ]]; then
-        _apply_theme "success" "✅ 投票已成功提交！ / Vote submitted successfully!"
+    local tx_hash tx_output
+    if ! tx_output=$(blockchain_create_transaction "vote_on_compute_engine" "$tx_data"); then
+        error "原生交易提交失败，请检查本地待处理状态后重试。 / Native submission failed; inspect local pending state before retry."
+        return 1
+    fi
+    tx_hash="${tx_output##*$'\n'}"
+    if [[ "$tx_hash" =~ ^[a-f0-9]{64}$ ]]; then
+        _apply_theme "success" "投票已在本地保存，等待原生共识确认。 / Vote stored locally; native consensus confirmation pending."
         _apply_theme "info" "  交易哈希 / Transaction Hash: ${tx_hash}"
     else
         error "提交投票失败。 / Failed to submit vote."
+        return 1
     fi
 }
 
