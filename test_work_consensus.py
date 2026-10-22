@@ -120,6 +120,9 @@ class NativeWorkLiveChain(Fixture):
         (self.etc/'identity.key').write_bytes(original_private);(self.etc/'identity.key.pub').write_bytes(original_public)
         snapshot=self.snapshot('native-work-rebuilt.json',height=123)
         self.assertEqual(len(snapshot['state']['chain_tables']['block_work']),2)
-        self.assertEqual(snapshot['state']['chain_tables']['blocks'][-1]['total_weight'],123000)
+        # Phoenix intentionally exports derived state without block history.
+        # Its independently verified canonical anchor must be the accepted tip.
+        self.assertEqual(snapshot['recovery_anchor']['height'],123)
+        self.assertEqual(snapshot['recovery_anchor']['block_hash'],tip['hash'])
 
 if __name__=='__main__':unittest.main()
