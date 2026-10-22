@@ -88,6 +88,14 @@ class NativeOpenCIUnits(Fixture):
             db.execute('INSERT INTO pending_proofs VALUES(?,?,?,?,?)',(self.payload['problem_id'],tx,self.identity,'null',121))
         return tx
 
+    def test_existing_pending_claim_cannot_be_admitted_again(self):
+        tx=self.pending()
+        with self.assertRaises(ValueError):self.check()
+        with sqlite3.connect(self.chain) as db:
+            db.row_factory=sqlite3.Row
+            self.assertEqual(consensus.validate_claim(db,self.network_id,self.payload,self.identity,111,accepted_tx=tx)['reward'],200)
+            with self.assertRaises(ValueError):consensus.validate_claim(db,self.network_id,self.payload,self.identity,111,accepted_tx='7'*64)
+
     def test_atomic_settlement_and_double_redemption(self):
         tx=self.pending()
         with sqlite3.connect(self.chain) as db:
