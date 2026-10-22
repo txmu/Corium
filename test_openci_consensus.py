@@ -160,6 +160,13 @@ class NativeOpenCILiveChain(Fixture):
         self.core_timeout=900
         self.run_core('blockchain_create_transaction submit_math_proof '+shlex.quote(json.dumps(bootstrap))+'; blockchain_mine_block')
         self.run_core('for h in $(seq 2 11); do blockchain_create_transaction set_nickname "{\\\"nickname\\\":\\\"bootstrap-$h\\\"}" >/dev/null || exit; blockchain_mine_block >/dev/null || exit; done')
+        # No score row exists before Engine Zero settles. Earlier IBC queue
+        # entries therefore cannot debit that future reward. Capture both
+        # canonical balance and already processed postage at the reward boundary.
+        with sqlite3.connect(self.chain) as db:
+            bootstrap_score=db.execute('SELECT score FROM contribution_scores WHERE user_id=?',(self.identity,)).fetchone()[0]
+            bootstrap_postage=db.execute("SELECT COALESCE(sum(q.postage),0) FROM ibc_outgoing_queue q JOIN transactions t ON t.hash=q.source_tx_hash WHERE t.type='ibc_dispatch' AND t.block_height IS NOT NULL AND t.public_key=?",(self.pem,)).fetchone()[0]
+        self.assertEqual(bootstrap_score,100)
         policy,keys=policy_for(genesis,self.identity,activation=122)
         real_payload=None
         if os.environ.get('CORIUM_OPENCI_OCI')=='1':
@@ -181,12 +188,12 @@ class NativeOpenCILiveChain(Fixture):
             self.assertEqual(db.execute('SELECT count(*) FROM completed_compute_tasks WHERE engine_id=?',('corium/internal-engine-zero-v1',)).fetchone()[0],1)
             postage=db.execute("SELECT COALESCE(sum(q.postage),0) FROM ibc_outgoing_queue q JOIN transactions t ON t.hash=q.source_tx_hash WHERE t.type='ibc_dispatch' AND t.block_height IS NOT NULL AND t.public_key=?",(self.pem,)).fetchone()[0]
             self.assertGreater(postage,0)
-            self.assertEqual(db.execute('SELECT score FROM contribution_scores WHERE user_id=?',(self.identity,)).fetchone()[0],100-postage)
+            self.assertEqual(db.execute('SELECT score FROM contribution_scores WHERE user_id=?',(self.identity,)).fetchone()[0],bootstrap_score-(postage-bootstrap_postage))
         self.run_core('for h in $(seq 124 133); do blockchain_create_transaction set_nickname "{\\"nickname\\":\\"native-settle-$h\\"}" >/dev/null || exit; blockchain_mine_block >/dev/null || exit; done')
         with sqlite3.connect(self.chain) as db:
             self.assertEqual(db.execute('SELECT proof_tx_hash FROM completed_compute_tasks WHERE engine_id=?',(engine,)).fetchone()[0],tx)
             postage=db.execute("SELECT COALESCE(sum(q.postage),0) FROM ibc_outgoing_queue q JOIN transactions t ON t.hash=q.source_tx_hash WHERE t.type='ibc_dispatch' AND t.block_height IS NOT NULL AND t.public_key=?",(self.pem,)).fetchone()[0]
-            expected_score=300-postage
+            expected_score=bootstrap_score+200-(postage-bootstrap_postage)
             self.assertEqual(db.execute('SELECT score FROM contribution_scores WHERE user_id=?',(self.identity,)).fetchone()[0],expected_score)
             self.assertEqual(db.execute('SELECT count(*) FROM pending_proofs').fetchone()[0],0)
         # Native Phoenix export independently rebuilds from signed history.
