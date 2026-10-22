@@ -164,7 +164,8 @@ class NativeOpenCILiveChain(Fixture):
         tx=self.run_core('blockchain_create_transaction submit_math_proof '+shlex.quote(json.dumps(payload))).stdout.strip().splitlines()[-1]
         self.run_core('blockchain_mine_block')
         with sqlite3.connect(self.chain) as db:
-            self.assertEqual(db.execute('SELECT count(*) FROM completed_compute_tasks').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT count(*) FROM completed_compute_tasks WHERE engine_id=?',(engine,)).fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT count(*) FROM completed_compute_tasks WHERE engine_id=?',('corium/internal-engine-zero-v1',)).fetchone()[0],1)
             self.assertEqual(db.execute('SELECT score FROM contribution_scores WHERE user_id=?',(self.identity,)).fetchone()[0],100)
         self.run_core('for h in $(seq 124 133); do blockchain_create_transaction set_nickname "{\\"nickname\\":\\"native-settle-$h\\"}" >/dev/null || exit; blockchain_mine_block >/dev/null || exit; done')
         with sqlite3.connect(self.chain) as db:
