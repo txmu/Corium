@@ -153,6 +153,10 @@ class NativeOpenCILiveChain(Fixture):
         self.run_core('blockchain_create_transaction submit_math_proof '+shlex.quote(json.dumps(bootstrap))+'; blockchain_mine_block')
         self.run_core('for h in $(seq 2 11); do blockchain_create_transaction set_nickname "{\\\"nickname\\\":\\\"bootstrap-$h\\\"}" >/dev/null || exit; blockchain_mine_block >/dev/null || exit; done')
         policy,keys=policy_for(genesis,self.identity,activation=122)
+        real_payload=None
+        if os.environ.get('CORIUM_OPENCI_OCI')=='1':
+            from native_receipts import execute
+            policy,real_payload=execute(genesis,self.identity,122)
         proposal={'pkg_id':consensus.PACKAGE,'description':'real native governance test','compute_program_hash':consensus.policy_digest(policy),'verifier_script_hash':consensus.source_digest(),'reward_weight':2,'openci_policy':policy}
         self.core_timeout=900
         engine=self.run_core('blockchain_create_transaction propose_new_compute_engine '+shlex.quote(json.dumps(proposal))).stdout.strip().splitlines()[-1]
@@ -161,7 +165,7 @@ class NativeOpenCILiveChain(Fixture):
         self.run_core('blockchain_create_transaction vote_on_compute_engine '+shlex.quote(json.dumps({'proposal_tx_hash':engine,'vote':'yes'}))+'; blockchain_mine_block')
         self.run_core('for h in $(seq 14 122); do blockchain_create_transaction set_nickname "{\\"nickname\\":\\"native-bounty-$h\\"}" >/dev/null || exit; blockchain_mine_block >/dev/null || exit; done')
         with sqlite3.connect(self.chain) as db:self.assertEqual(db.execute('SELECT is_active FROM compute_engines WHERE engine_id=?',(engine,)).fetchone()[0],1)
-        payload=proof_for(policy,keys,engine)
+        payload=({**real_payload,'engine_id':engine} if real_payload else proof_for(policy,keys,engine))
         tx=self.run_core('blockchain_create_transaction submit_math_proof '+shlex.quote(json.dumps(payload))).stdout.strip().splitlines()[-1]
         self.run_core('blockchain_mine_block')
         with sqlite3.connect(self.chain) as db:
