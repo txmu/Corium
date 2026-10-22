@@ -69,3 +69,20 @@ The output explicitly preserves these separate states. Existing v108 blocks
 and the mainnet consensus remain unchanged. The six native-parent tests include
 real native transaction validation, original PoS mining and observing its parent
 weight; they must not be called v2 consensus activation or multi-node acceptance.
+
+## Native testnet integration under acceptance
+
+`work_consensus.py` and the embedded `corix_v108.sh` helper now bind governed
+`consensus/work-weight:2` policies to signed native blocks, trusted parent
+cumulative weight, producer, reorganization validation, DHT block serialization
+and independent Phoenix replay. The additive `block_work` table preserves the
+original eight-column block schema. Explicit governance checkpoints constrain
+reorganizations; they do not implement rolling finality. Difficulty is currently
+fixed by the approved policy, not automatically adjusted.
+
+Only `test-*` and `ziokt-test-*` networks can activate this integration. Presence
+of code is not activation. `test_work_consensus.NativeWorkLiveChain` must pass
+actual proposal/vote/enactment and independent replay on CI. Peer partition,
+upgrade compatibility and difficulty calibration remain acceptance gates.
+Production mainnet retains its original rules. This implementation does not
+constitute completed mainnet migration or an anonymity guarantee.

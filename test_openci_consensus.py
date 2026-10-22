@@ -69,8 +69,9 @@ class NativeOpenCIUnits(Fixture):
             with self.subTest(change=change),self.assertRaises((ValueError,consensus.InvalidSignature)):self.check(payload)
 
     def test_governance_key_hash_domain_and_program_changes_reject(self):
-        for change in ('inactive','engine_hash','verifier_hash','domain'):
+        for change in ('inactive','engine_hash','verifier_hash','domain','reward_weight'):
             with sqlite3.connect(self.chain) as db:
+                if change=='reward_weight':db.execute('UPDATE compute_engines SET reward_weight=3')
                 if change=='inactive':db.execute('UPDATE compute_engines SET is_active=0')
                 if change=='engine_hash':db.execute('UPDATE compute_engines SET compute_program_hash=?',('0'*64,))
                 if change=='verifier_hash':db.execute('UPDATE compute_engines SET verifier_script_hash=?',('0'*64,))
@@ -78,7 +79,7 @@ class NativeOpenCIUnits(Fixture):
                     value=copy.deepcopy(self.proposal);value['openci_policy']['workers'][1]['failure_domain']='domain0';db.execute('UPDATE transactions SET data=? WHERE hash=?',(json.dumps(value),self.engine))
             with self.subTest(change=change),self.assertRaises(ValueError):self.check()
             with sqlite3.connect(self.chain) as db:
-                db.execute('UPDATE compute_engines SET is_active=1,compute_program_hash=?,verifier_script_hash=?',(consensus.policy_digest(self.policy),consensus.source_digest()));db.execute('UPDATE transactions SET data=? WHERE hash=?',(json.dumps(self.proposal),self.engine))
+                db.execute('UPDATE compute_engines SET is_active=1,reward_weight=2,compute_program_hash=?,verifier_script_hash=?',(consensus.policy_digest(self.policy),consensus.source_digest()));db.execute('UPDATE transactions SET data=? WHERE hash=?',(json.dumps(self.proposal),self.engine))
 
     def pending(self):
         tx='6'*64
@@ -166,15 +167,19 @@ class NativeOpenCILiveChain(Fixture):
         with sqlite3.connect(self.chain) as db:
             self.assertEqual(db.execute('SELECT count(*) FROM completed_compute_tasks WHERE engine_id=?',(engine,)).fetchone()[0],0)
             self.assertEqual(db.execute('SELECT count(*) FROM completed_compute_tasks WHERE engine_id=?',('corium/internal-engine-zero-v1',)).fetchone()[0],1)
-            self.assertEqual(db.execute('SELECT score FROM contribution_scores WHERE user_id=?',(self.identity,)).fetchone()[0],100)
+            postage=db.execute("SELECT COALESCE(sum(q.postage),0) FROM ibc_outgoing_queue q JOIN transactions t ON t.hash=q.source_tx_hash WHERE t.type='ibc_dispatch' AND t.block_height IS NOT NULL AND t.public_key=?",(self.pem,)).fetchone()[0]
+            self.assertGreater(postage,0)
+            self.assertEqual(db.execute('SELECT score FROM contribution_scores WHERE user_id=?',(self.identity,)).fetchone()[0],100-postage)
         self.run_core('for h in $(seq 124 133); do blockchain_create_transaction set_nickname "{\\"nickname\\":\\"native-settle-$h\\"}" >/dev/null || exit; blockchain_mine_block >/dev/null || exit; done')
         with sqlite3.connect(self.chain) as db:
             self.assertEqual(db.execute('SELECT proof_tx_hash FROM completed_compute_tasks WHERE engine_id=?',(engine,)).fetchone()[0],tx)
-            self.assertEqual(db.execute('SELECT score FROM contribution_scores WHERE user_id=?',(self.identity,)).fetchone()[0],300)
+            postage=db.execute("SELECT COALESCE(sum(q.postage),0) FROM ibc_outgoing_queue q JOIN transactions t ON t.hash=q.source_tx_hash WHERE t.type='ibc_dispatch' AND t.block_height IS NOT NULL AND t.public_key=?",(self.pem,)).fetchone()[0]
+            expected_score=300-postage
+            self.assertEqual(db.execute('SELECT score FROM contribution_scores WHERE user_id=?',(self.identity,)).fetchone()[0],expected_score)
             self.assertEqual(db.execute('SELECT count(*) FROM pending_proofs').fetchone()[0],0)
         # Native Phoenix export independently rebuilds from signed history.
         snapshot=self.snapshot('openci-rebuilt.json',height=133)
-        self.assertEqual(next(r['score'] for r in snapshot['state']['chain_tables']['contribution_scores'] if r['user_id']==self.identity),300)
+        self.assertEqual(next(r['score'] for r in snapshot['state']['chain_tables']['contribution_scores'] if r['user_id']==self.identity),expected_score)
 
     def setUp(self):
         self.network_id='test-openci-settlement';super().setUp()

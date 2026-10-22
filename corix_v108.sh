@@ -24766,11 +24766,14 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                 block_hash = payload
                 block_data = db_query_ro(BLOCKCHAIN_DB_PATH, "SELECT height, previous_hash, timestamp, validator, signature, transactions FROM blocks WHERE hash = ?;", (block_hash,), fetch_one=True)
                 if block_data:
-                    return {"status": "success", "data": "BLOCK:" + json.dumps({
+                    native_block={
                         "height": block_data[0], "previous_hash": block_data[1],
                         "timestamp": block_data[2], "validator": block_data[3],
-                        "signature": block_data[4], "transactions": json.loads(block_data[5])
-                    }, ensure_ascii=False, separators=(',', ':'))}
+                        "signature": block_data[4], "transactions": json.loads(block_data[5])}
+                    has_work=db_query_ro(BLOCKCHAIN_DB_PATH,"SELECT 1 FROM sqlite_master WHERE type='table' AND name='block_work'",(),fetch_one=True)
+                    proof=db_query_ro(BLOCKCHAIN_DB_PATH,"SELECT proof FROM block_work WHERE hash=?",(block_hash,),fetch_one=True) if has_work else None
+                    if proof: native_block['work']=json.loads(proof[0])
+                    return {"status": "success", "data": "BLOCK:" + json.dumps(native_block,ensure_ascii=False,separators=(',',':'))}
                 else:
                     return {"status": "error", "message": "Block not found."}
             except Exception as e:
@@ -25945,6 +25948,7 @@ _blockchain_reorganize_to() (
     # --- 步骤 2: 回滚本地链到共同祖先 ---
     # --- Step 2: Roll back the local chain to the common ancestor ---
     info "正在回滚本地无效的区块... (Rolling back local invalid blocks...)"
+    _corium_work_consensus fork-guard "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$ancestor_hash" >/dev/null || return 1
     _rollback_to_ancestor "$local_tip_hash" "$ancestor_hash" || return 1
     _internal_rebuild_derived_state || return 1
     info "本地链已回滚。 (Local chain reverted.)"
@@ -25998,6 +26002,12 @@ _blockchain_reorganize_to() (
         jq -e 'type=="array" and all(.[]; type=="string" and test("^[a-f0-9]{64}$")) and length==(unique|length)' <<< "$tx_json_str" >/dev/null || return 1
         info "  -> 验证区块签名... (Verifying block signature...)"
         local block_content_to_verify="{\"height\":$height,\"previous_hash\":\"$prev_hash\",\"timestamp\":$ts,\"transactions\":$tx_json_str}"
+        local work_mode work_check=""
+        work_mode=$(_corium_work_consensus mode "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$height" | jq -er .mode) || return 1
+        if [ "$work_mode" = pow-v2 ]; then
+            work_check=$(_corium_work_consensus verify "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$block_content_json" "$block_to_apply") || return 1
+        else
+            jq -e 'has("work")|not' <<< "$block_content_json" >/dev/null || return 1
         
         _protocol_execute_scheduled_changes "$height" || return 1
         _slashing_check_for_jailed_validators "$height" || return 1
@@ -26017,6 +26027,7 @@ _blockchain_reorganize_to() (
             error "[REORG-VALIDATE] 区块哈希与其内容不匹配！区块被拒绝，重组失败。 (Block hash does not match its content! Block rejected, reorg failed.)"
         fi
         
+        fi
         info "  -> 验证区块内的所有交易... (Verifying all transactions within the block...)"
         declare -A _PKG_REGISTRATIONS_IN_THIS_BLOCK
         mapfile -t tx_hashes < <(echo "$tx_json_str" | jq -r '.[]')
@@ -26031,14 +26042,21 @@ _blockchain_reorganize_to() (
         info "  -> 所有验证通过。 (All validations passed.)"
         
         local validator_stake new_total_weight
+        if [ "$work_mode" = pow-v2 ]; then
+            new_total_weight=$(jq -er .total_weight <<< "$work_check") || return 1
+        else
         validator_stake=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT stake FROM validators WHERE public_key_hash = %s AND status = 'active';" "$validator_id")
         [[ "$validator_stake" =~ ^[1-9][0-9]{0,18}$ ]] || return 1
         [ "$validator_stake" -le "$((9223372036854775807-parent_total_weight))" ] || return 1
         new_total_weight=$((parent_total_weight + validator_stake))
+        fi
 
         db_execute_safe "$BLOCKCHAIN_DB" \
             "INSERT INTO blocks (hash, height, previous_hash, timestamp, validator, signature, transactions, total_weight) VALUES (%s, %d, %s, %d, %s, %s, %s, %d);" \
             "$block_to_apply" "$height" "$prev_hash" "$ts" "$validator_id" "$signature" "$tx_json_str" "$new_total_weight"
+        if [ "$work_mode" = pow-v2 ]; then
+            _corium_work_consensus record "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$block_content_json" "$block_to_apply" >/dev/null || return 1
+        fi
         
         # --- [MODIFICATION START] Process state transitions for the applied block during reorg ---
         # --- [修改开始] 在重组期间，为已应用的区块处理状态转换 ---
@@ -26264,7 +26282,7 @@ import sys
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 
-EMBEDDED_SOURCE_DIGEST = 'cc4f0ff2183cb838c43067ebd9e7392e71b87d9bfbe5d702261c34ec94cf9f33'
+EMBEDDED_SOURCE_DIGEST = '962411dc13624258d741fbdec517e1f35e7ac3bd1f822e99e1bc5b9c32528977'
 PACKAGE='compute/openci-attested:1'
 SCHEMA='corium.openci-attested-bounties.v1'
 DOMAIN='OpenCI/worker-receipt/v1'
@@ -26344,6 +26362,7 @@ def active_policy(db,network,engine,height):
     require(row['compute_program_hash']==policy_digest(value) and row['verifier_script_hash']==source_digest(),'active engine commitment mismatch')
     require(value['activation_height']<=height<value['expiry_height'],'bounty admission height')
     integer(row['reward_weight'],1,1000000)
+    require(type(payload.get('reward_weight')) is int and row['reward_weight']==payload['reward_weight'],'signed governance reward weight mismatch')
     return value,row['reward_weight']
 
 
@@ -26420,6 +26439,307 @@ except (ValueError,TypeError,KeyError,InvalidSignature,sqlite3.Error):
 PY_CORIUM_OPENCI_CONSENSUS
 )
 # END ZIOKT OPENCI CONSENSUS V1
+
+# BEGIN CORIUM NATIVE WORK CONSENSUS V2
+_corium_work_consensus() (
+    ulimit -t 15 -v 262144 || exit 2
+    "${PYTHON_CMD:-python3}" - "$@" <<'PY_CORIUM_WORK_CONSENSUS'
+def _native_work_primitives():
+    """Versioned deterministic PoW/weight adapter primitives.
+
+    This module verifies work and calculates weight. It does not activate a network,
+    validate signatures/transactions, grant stake, or modify a ledger. Existing v108
+    consensus must not treat its presence as permission to change consensus.
+    """
+    import hashlib
+    import json
+    import re
+
+    SCHEMA='corium.work-weight-policy.v1'
+    PROOF='corium.sha256-work.v1'
+    HEX=re.compile('[a-f0-9]{64}\\Z')
+    MAX_HEIGHT=2**32-1
+    MAX_WEIGHT=2**63-1
+
+
+    class PolicyError(ValueError):
+        def __init__(self,code,message):
+            super().__init__(message);self.code=code
+
+
+    def integer(value,low,high):
+        if type(value) is not int or not low<=value<=high:
+            raise PolicyError('WORK_INTEGER','Bounded integer required')
+        return value
+
+
+    def digest(value):
+        if not isinstance(value,str) or not HEX.fullmatch(value):
+            raise PolicyError('WORK_DIGEST','Exact lowercase SHA-256 required')
+        return value
+
+
+    def encoded(value):
+        return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode()
+
+
+    def validate(policy):
+        fields={'schema','network','genesis','activation_height','difficulty_bits','weights'}
+        if not isinstance(policy,dict) or set(policy)!=fields or policy['schema']!=SCHEMA:
+            raise PolicyError('WORK_POLICY_SCHEMA','Exact versioned work policy required')
+        if not isinstance(policy['network'],str) or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',policy['network']):
+            raise PolicyError('WORK_NETWORK','Bounded native network identifier required')
+        digest(policy['genesis']);activation=integer(policy['activation_height'],1,MAX_HEIGHT)
+        integer(policy['difficulty_bits'],1,256)
+        weights=policy['weights']
+        if not isinstance(weights,list) or not 1<=len(weights)<=64:
+            raise PolicyError('WORK_SCHEDULE','One to 64 explicitly ordered height epochs required')
+        last=activation-1
+        for entry in weights:
+            if not isinstance(entry,dict) or set(entry)!={'from_height','weight'}:
+                raise PolicyError('WORK_SCHEDULE','Exact epoch height and weight required')
+            height=integer(entry['from_height'],activation,MAX_HEIGHT)
+            integer(entry['weight'],1,MAX_WEIGHT)
+            if height<=last:raise PolicyError('WORK_SCHEDULE','Epoch heights must increase strictly')
+            last=height
+        if weights[0]['from_height']!=activation:
+            raise PolicyError('WORK_SCHEDULE','First epoch must start exactly at activation')
+        return json.loads(encoded(policy))
+
+
+    def commitment(policy):
+        return hashlib.sha256(b'Corium/WorkPolicy/v1\0'+encoded(validate(policy))).hexdigest()
+
+
+    def weight_at(policy,height,*,network,genesis):
+        policy=validate(policy);integer(height,0,MAX_HEIGHT)
+        if policy['network']!=network or policy['genesis']!=genesis:
+            raise PolicyError('WORK_CHAIN_MISMATCH','Policy belongs to another chain')
+        if height<policy['activation_height']:
+            raise PolicyError('WORK_NOT_ACTIVE','No policy weight before activation')
+        return next(entry['weight'] for entry in reversed(policy['weights']) if entry['from_height']<=height)
+
+
+    def work_digest(policy,context,nonce):
+        """Bind nonce to a block candidate and policy, excluding mutable wall time."""
+        policy=validate(policy)
+        if not isinstance(context,dict) or set(context)!={'height','parent','body','miner'}:
+            raise PolicyError('WORK_CONTEXT','Exact height/parent/body/miner commitment required')
+        integer(context['height'],1,MAX_HEIGHT)
+        for field in ('parent','body','miner'):digest(context[field])
+        integer(nonce,0,2**64-1)
+        value={'schema':PROOF,'policy':commitment(policy),'context':context,'nonce':nonce}
+        return hashlib.sha256(b'Corium/BlockWork/v1\0'+encoded(value)).hexdigest()
+
+
+    def verify_work(policy,context,proof,*,network,genesis,parent_weight):
+        """No stake prerequisite after valid work; weights depend only on height.
+
+        Caller must separately verify native block signatures, payload commitments,
+        transactions, parent linkage, activation governance and all fork rules.
+        """
+        policy=validate(policy);integer(parent_weight,0,MAX_WEIGHT)
+        if not isinstance(proof,dict) or set(proof)!={'schema','policy','nonce'} or proof['schema']!=PROOF or proof['policy']!=commitment(policy):
+            raise PolicyError('WORK_PROOF_SCHEMA','Proof must bind exact active policy commitment')
+        calculated=work_digest(policy,context,proof['nonce'])
+        if int(calculated,16)>=(1<<(256-policy['difficulty_bits'])):
+            raise PolicyError('WORK_TARGET','Nonce does not meet committed difficulty')
+        weight=weight_at(policy,context['height'],network=network,genesis=genesis)
+        if parent_weight>MAX_WEIGHT-weight:
+            raise PolicyError('WORK_WEIGHT_OVERFLOW','Cumulative work weight exceeds native SQLite integer range')
+        return {'schema':'corium.work-weight-result.v1','work_digest':calculated,'weight':weight,
+                'total_weight':parent_weight+weight,'policy':commitment(policy),
+                'block_fully_validated':False,'ledger_modified':False,'network_activated':False}
+
+    return locals()
+_work_primitives=_native_work_primitives()
+validate,commitment,verify_work,work_digest,integer,encoded,MAX_WEIGHT=(_work_primitives[k] for k in ("validate","commitment","verify_work","work_digest","integer","encoded","MAX_WEIGHT"))
+
+"""Governed native testnet PoW block bytes and cumulative work policy.
+
+Native callers must still validate transactions and commit/rebuild atomically.
+This module never changes production consensus merely by being present.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import sqlite3
+from cryptography.hazmat.primitives import hashes,serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.exceptions import InvalidSignature
+
+
+PACKAGE='consensus/work-weight:2'
+SCHEMA='corium.native-work-policy.v2'
+PROOF='corium.native-block-work.v2'
+LEGACY=hashlib.sha256(b'Corium/native-pos/v108').hexdigest()
+EMBEDDED_SOURCE_DIGEST = 'bc06131cdbd4e07521c27cec821cfb6b0948c56cde50947098800beb4e2832b8'
+
+
+def require(test,message):
+    if not test:raise ValueError(message)
+
+
+def source_digest():return EMBEDDED_SOURCE_DIGEST or hashlib.sha256(b'Corium/NativeWorkVerifier/v2\0'+Path(__file__).read_bytes()+b'\0'+Path(__file__).with_name('work_weight_policy.py').read_bytes()).hexdigest()
+def policy_hash(value):return hashlib.sha256(b'Corium/NativeConsensusPolicy/v2\0'+encoded(value)).hexdigest()
+
+def loads(raw):
+    require(type(raw) is str and len(raw.encode())<=65536,'native work message budget')
+    def unique(pairs):
+        value={}
+        for key,item in pairs:
+            require(key not in value,'duplicate consensus field');value[key]=item
+        return value
+    return json.loads(raw,object_pairs_hook=unique,parse_constant=lambda value:(_ for _ in ()).throw(ValueError('nonfinite consensus number')))
+
+
+def eligible_network(network):require(type(network) is str and (network.startswith('test-') or network.startswith('ziokt-test-')),'testnet-only work consensus')
+
+def check_policy(value,network,genesis):
+    eligible_network(network)
+    require(type(value) is dict and set(value)=={'schema','previous_policy','work_policy','checkpoint'} and value['schema']==SCHEMA,'exact native consensus policy')
+    policy=validate(value['work_policy']);require(policy['network']==network and policy['genesis']==genesis,'native network/genesis binding')
+    require(type(value['previous_policy']) is str and re.fullmatch('[a-f0-9]{64}',value['previous_policy']),'prior consensus commitment')
+    checkpoint=value['checkpoint'];require(type(checkpoint) is dict and set(checkpoint)=={'height','hash'},'governed checkpoint')
+    integer(checkpoint['height'],0,policy['activation_height']-1);require(type(checkpoint['hash']) is str and re.fullmatch('[a-f0-9]{64}',checkpoint['hash']),'checkpoint digest')
+    return value
+
+
+def proposal(db,network,payload,height):
+    require(payload.get('pkg_id')==PACKAGE,'native consensus package')
+    genesis=db.execute('SELECT hash FROM blocks WHERE height=0').fetchone();require(genesis is not None,'native genesis required')
+    value=check_policy(payload.get('work_consensus'),network,genesis[0])
+    require(value['work_policy']['activation_height']>=height+110,'full governance window and enactment delay required')
+    require(payload.get('compute_program_hash')==policy_hash(value) and payload.get('verifier_script_hash')==source_digest(),'native consensus source/policy commitments')
+    checkpoint=value['checkpoint'];known=db.execute('SELECT hash FROM blocks WHERE height=? AND height<?',(checkpoint['height'],height)).fetchone();require(known is not None and known[0]==checkpoint['hash'],'checkpoint must precede governance proposal')
+    pending=db.execute("SELECT 1 FROM transactions t LEFT JOIN compute_engines e ON e.engine_id=t.hash WHERE t.type='propose_new_compute_engine' AND json_extract(t.data,'$.pkg_id')=? AND t.block_height<? AND (t.block_height+110>=? OR (e.is_active=1 AND json_extract(t.data,'$.work_consensus.work_policy.activation_height')>?)) LIMIT 1",(PACKAGE,height,height,height)).fetchone();require(pending is None,'prior work transition must resolve before another proposal')
+    previous=active(db,network,height,validate_previous=False)
+    require(value['previous_policy']==(policy_hash(previous) if previous else LEGACY),'consensus predecessor changed')
+    return value
+
+
+def active(db,network,height,validate_previous=True):
+    if not (network.startswith('test-') or network.startswith('ziokt-test-')):return None
+    rows=db.execute("SELECT e.compute_program_hash,e.verifier_script_hash,t.data,t.block_height FROM compute_engines e JOIN transactions t ON t.hash=e.engine_id WHERE e.pkg_id=? AND e.is_active=1 AND t.type='propose_new_compute_engine' AND t.block_height IS NOT NULL ORDER BY t.block_height,t.hash",(PACKAGE,)).fetchall()
+    genesis=db.execute('SELECT hash FROM blocks WHERE height=0').fetchone();require(genesis is not None,'native genesis required')
+    accepted=[];previous=LEGACY
+    for row in rows:
+        payload=json.loads(row['data']);value=check_policy(payload.get('work_consensus'),network,genesis[0])
+        activation=value['work_policy']['activation_height']
+        if activation>height:continue
+        require(row['compute_program_hash']==policy_hash(value) and row['verifier_script_hash']==source_digest() and activation>=row['block_height']+110,'active native governance commitment')
+        if validate_previous:require(value['previous_policy']==previous and (not accepted or activation>accepted[-1]['work_policy']['activation_height']),'native activation sequence')
+        checkpoint=value['checkpoint'];known=db.execute('SELECT hash FROM blocks WHERE height=?',(checkpoint['height'],)).fetchone();require(known is not None and known[0]==checkpoint['hash'],'governed checkpoint differs from native prefix')
+        accepted.append(value);previous=policy_hash(value)
+    return accepted[-1] if accepted else None
+
+
+def parent(db,hash_value):
+    row=db.execute('SELECT height,hash,timestamp,total_weight FROM blocks WHERE hash=?',(hash_value,)).fetchone();require(row is not None,'accepted native parent required')
+    return dict(row)
+
+
+def miner_key(value):
+    require(type(value) is str and len(value)<=1024,'bounded native public key')
+    key=serialization.load_pem_public_key(value.encode('ascii'))
+    require(isinstance(key,ec.EllipticCurvePublicKey) and isinstance(key.curve,ec.SECP256K1),'native secp256k1 required')
+    require(key.public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode().rstrip('\n')==value,'canonical public key')
+    return key
+
+
+def signing_bytes(block):
+    return b'Corium/NativeWorkBlock/v2\0'+encoded({k:v for k,v in block.items() if k!='signature'})
+
+
+def context(block):
+    proof=block['work'];body={k:v for k,v in block.items() if k not in {'signature','work'}}
+    body['work']={k:v for k,v in proof.items() if k!='nonce'}
+    return {'height':block['height'],'parent':block['previous_hash'],'body':hashlib.sha256(b'Corium/NativeWorkBody/v2\0'+encoded(body)).hexdigest(),'miner':block['validator']}
+
+
+def verify(db,network,block,expected):
+    require(type(block) is dict and set(block)=={'height','previous_hash','timestamp','validator','signature','transactions','work'},'exact native work block')
+    p=parent(db,block['previous_hash']);require(type(block['height']) is int and block['height']==p['height']+1,'native parent/height')
+    value=active(db,network,block['height']);require(value is not None,'work consensus is not active')
+    proof=block['work'];require(type(proof) is dict and set(proof)=={'schema','activation','policy','miner_public_key','nonce'} and proof['schema']==PROOF,'versioned native work proof')
+    require(proof['activation']==policy_hash(value) and proof['policy']==commitment(value['work_policy']),'exact governed activation')
+    key=miner_key(proof['miner_public_key']);require(block['validator']==hashlib.sha256(proof['miner_public_key'].encode()).hexdigest(),'native miner identity')
+    integer(block['timestamp'],p['timestamp'],2**63-1)
+    txs=block['transactions'];require(type(txs) is list and len(txs)<=200 and all(type(tx) is str and re.fullmatch('[a-f0-9]{64}',tx) for tx in txs) and len(set(txs))==len(txs),'bounded unique transaction hashes')
+    result=verify_work(value['work_policy'],context(block),{'schema':'corium.sha256-work.v1','policy':proof['policy'],'nonce':proof['nonce']},network=network,genesis=value['work_policy']['genesis'],parent_weight=p['total_weight'])
+    raw=signing_bytes(block);require(type(expected) is str and hashlib.sha256(raw).hexdigest()==expected,'native work block identity')
+    signature=block['signature'];require(type(signature) is str and re.fullmatch('[a-f0-9]{16,144}',signature) and len(signature)%2==0,'bounded native DER signature')
+    key.verify(bytes.fromhex(signature),raw,ec.ECDSA(hashes.SHA256()))
+    return {'hash':expected,'height':block['height'],'validator':block['validator'],'total_weight':result['total_weight'],'work_weight':result['weight'],'consensus_policy':policy_hash(value),'work_verified':True,'transactions_validated_by_native_caller':False}
+
+
+def mine(db,network,key_file,previous,timestamp,transactions,attempts=100000,start_nonce=0):
+    p=parent(db,previous);value=active(db,network,p['height']+1);require(value is not None,'work consensus is not active')
+    integer(attempts,1,1000000);integer(start_nonce,0,2**64-attempts)
+    key=serialization.load_pem_private_key(Path(key_file).read_bytes(),password=None)
+    require(isinstance(key,ec.EllipticCurvePrivateKey) and isinstance(key.curve,ec.SECP256K1),'native private key required')
+    public=key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode().rstrip('\n')
+    block={'height':p['height']+1,'previous_hash':previous,'timestamp':timestamp,'validator':hashlib.sha256(public.encode()).hexdigest(),'signature':'','transactions':transactions,'work':{'schema':PROOF,'activation':policy_hash(value),'policy':commitment(value['work_policy']),'miner_public_key':public,'nonce':0}}
+    ctx=context(block)
+    for nonce in range(start_nonce,start_nonce+attempts):
+        if int(work_digest(value['work_policy'],ctx,nonce),16)>=2**(256-value['work_policy']['difficulty_bits']):continue
+        block['work']['nonce']=nonce;raw=signing_bytes(block);identity=hashlib.sha256(raw).hexdigest();block['signature']=key.sign(raw,ec.ECDSA(hashes.SHA256())).hex()
+        return {'block':block,**verify(db,network,block,identity)}
+    raise ValueError('bounded mining work exhausted')
+
+
+def record(db,network,block,identity):
+    result=verify(db,network,block,identity)
+    row=db.execute('SELECT height,previous_hash,timestamp,validator,signature,transactions,total_weight FROM blocks WHERE hash=?',(identity,)).fetchone();require(row is not None,'native block must already be committed in the enclosing transaction')
+    require(dict(row)=={'height':block['height'],'previous_hash':block['previous_hash'],'timestamp':block['timestamp'],'validator':block['validator'],'signature':block['signature'],'transactions':json.dumps(block['transactions'],separators=(',',':')),'total_weight':result['total_weight']},'stored native block fields differ')
+    old=db.execute('SELECT proof FROM block_work WHERE hash=?',(identity,)).fetchone();require(old is None or json.loads(old[0])==block['work'],'native proof identity conflict')
+    db.execute('INSERT OR IGNORE INTO block_work VALUES(?,?)',(identity,encoded(block['work']).decode()));return result
+
+
+def stored(db,identity):
+    row=db.execute('SELECT height,previous_hash,timestamp,validator,signature,transactions FROM blocks WHERE hash=?',(identity,)).fetchone();require(row is not None,'stored native block required')
+    value=dict(row);value['transactions']=json.loads(value['transactions']);proof=db.execute('SELECT proof FROM block_work WHERE hash=?',(identity,)).fetchone()
+    if proof:value['work']=json.loads(proof[0])
+    return value
+
+
+def main(args):
+    action,path,network=args[:3]
+    with sqlite3.connect(path) as db:
+        db.row_factory=sqlite3.Row
+        if action=='proposal':result=proposal(db,network,loads(args[3]),int(args[4]))
+        elif action=='preactivate':
+            enabled=network.startswith('test-') or network.startswith('ziokt-test-')
+            due=db.execute("SELECT 1 FROM scheduled_state_changes WHERE enactment_height=? AND type='propose_new_compute_engine' AND json_extract(data,'$.pkg_id')=? LIMIT 1",(int(args[3]),PACKAGE)).fetchone() if enabled else None
+            result={'required':bool(due)}
+        elif action=='mode':
+            value=active(db,network,int(args[3]));result={'mode':'pow-v2' if value else 'legacy-pos','policy':policy_hash(value) if value else LEGACY}
+        elif action=='mine':result=mine(db,network,args[3],args[4],int(args[5]),json.loads(args[6]))
+        elif action=='verify':result=verify(db,network,loads(args[3]),args[4])
+        elif action=='verify-file':
+            path=Path(args[3]);require(path.is_file() and path.stat().st_size<=65536,'native block file budget');result=verify(db,network,loads(path.read_text()),args[4])
+        elif action=='record':result=record(db,network,loads(args[3]),args[4])
+        elif action=='stored':result=stored(db,args[3])
+        elif action=='fork-guard':
+            tip=db.execute('SELECT max(height) FROM blocks').fetchone()[0];value=active(db,network,tip);ancestor=db.execute('SELECT height FROM blocks WHERE hash=?',(args[3],)).fetchone();require(ancestor is not None,'known native ancestor')
+            require(value is None or ancestor[0]>=value['checkpoint']['height'],'governed native checkpoint boundary');result={'allowed':True}
+        else:raise ValueError('unknown native work action')
+    print(json.dumps(result,separators=(',',':')))
+
+
+
+
+import sys
+try:
+    main(sys.argv[1:])
+except (ValueError,TypeError,KeyError,InvalidSignature,sqlite3.Error):
+    print('WORK_CONSENSUS_REJECTED',file=sys.stderr)
+    raise SystemExit(2)
+PY_CORIUM_WORK_CONSENSUS
+)
+# END CORIUM NATIVE WORK CONSENSUS V2
 
 _validate_single_transaction() {
     local tx_hash="$1"
@@ -26564,6 +26884,8 @@ _validate_single_transaction() {
             # Verification 1b: Has this problem been finalized and solved historically?
             local engine_id
             engine_id=$(echo "$tx_payload" | jq -r .engine_id 2>/dev/null)
+            # Consensus-policy governance entries are not redeemable compute jobs.
+            [ "$(db_query_safe "$BLOCKCHAIN_DB" "SELECT pkg_id FROM compute_engines WHERE engine_id=%s;" "$engine_id")" != consensus/work-weight:2 ] || return 1
             
             # [Batch 4] 阻止重复提交 (Double-Redeem 防御)
             local solved_count
@@ -26685,6 +27007,11 @@ PY_ENGINE_ZERO
             ;;
         "propose_new_compute_engine")
             detail "    - Validating 'propose_new_compute_engine' transaction... / 正在验证 'propose_new_compute_engine' 交易..."
+            if [ "$(jq -r .pkg_id <<< "$tx_payload")" = consensus/work-weight:2 ]; then
+                _corium_work_consensus proposal "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$tx_payload" "$block_height" >/dev/null || return 1
+                [ -z "${intra_block_state_tracker[work-policy]:-}" ] || return 1
+                intra_block_state_tracker[work-policy]=1
+            fi
             if [ "$(jq -r .pkg_id <<< "$tx_payload")" = compute/openci-attested:1 ]; then
                 _corium_openci_consensus proposal "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$tx_payload" "$block_height" >/dev/null || return 1
             fi
@@ -26982,9 +27309,18 @@ blockchain_mine_block() (
     info "尝试创建并广播新区块... (Attempting to create and broadcast a new block...)"
     
     # 1. 检查是否有待处理的交易 (Check if there are any pending transactions)
+    local activation_height work_mode work_result="" native_work_block=""
+    activation_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE(MAX(height),-1)+1 FROM blocks;") || return 1
+    local early_work_activation=false
+    if [ "$(_corium_work_consensus preactivate "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$activation_height" | jq -er .required)" = true ]; then
+        _protocol_execute_scheduled_changes "$activation_height" || return 1
+        _slashing_check_for_jailed_validators "$activation_height" || return 1
+        early_work_activation=true
+    fi
+    work_mode=$(_corium_work_consensus mode "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$activation_height" | jq -er .mode) || return 1
     local pending_txs
     pending_txs=$(db_query_static "$BLOCKCHAIN_DB" "SELECT hash FROM transactions WHERE block_height IS NULL ORDER BY timestamp, hash;") || return 1
-    if [ -z "$pending_txs" ]; then
+    if [ -z "$pending_txs" ] && [ "$work_mode" != pow-v2 ]; then
         debug "没有待处理的交易需要打包。 (No pending transactions to mine.)"
         return 0
     fi
@@ -26997,16 +27333,21 @@ blockchain_mine_block() (
 
     # 3. 确定下一个合法的区块验证者，并检查是否轮到我们 (Identify the next legitimate block validator and check if it's our turn)
     local next_validator_pubkey
+    if [ "$work_mode" != pow-v2 ]; then
     next_validator_pubkey=$(blockchain_get_next_validator) || return 1
     if [ "$our_pubkey" != "$next_validator_pubkey" ]; then
         info "根据共识，现在不是我们创建区块的时候。跳过。 (According to consensus, it is not our turn to create a block. Skipping.)"
         return 0
     fi
     
-    local activation_height; activation_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE(MAX(height),-1)+1 FROM blocks;") || return 1
-    _protocol_execute_scheduled_changes "$activation_height" || return 1
-    _slashing_check_for_jailed_validators "$activation_height" || return 1
-    stake=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT stake FROM validators WHERE public_key=%s AND status='active';" "$our_pubkey") || return 1
+    fi
+    if ! $early_work_activation; then
+        _protocol_execute_scheduled_changes "$activation_height" || return 1
+        _slashing_check_for_jailed_validators "$activation_height" || return 1
+    fi
+    if [ "$work_mode" != pow-v2 ]; then
+        stake=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT stake FROM validators WHERE public_key=%s AND status='active';" "$our_pubkey") || return 1
+    fi
     msg "轮到我们创建区块了！正在打包、签名并广播... (It's our turn to create a block! Packaging, signing, and broadcasting...)"
     
     # 4. 获取最新的区块哈希和高度 (Get the latest block hash and height)
@@ -27033,12 +27374,22 @@ blockchain_mine_block() (
     local block_data_to_sign="{\"height\":$height,\"previous_hash\":\"$latest_hash\",\"timestamp\":$timestamp,\"transactions\":$tx_json}"
     local block_hash=$(_internal_hash_text "$block_data_to_sign")
     local signature=$(sign_data "$block_data_to_sign" "$USER_IDENTITY_FILE")
+    if [ "$work_mode" = pow-v2 ]; then
+        work_result=$(_corium_work_consensus mine "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$USER_IDENTITY_FILE" "$latest_hash" "$timestamp" "$tx_json") || return 1
+        native_work_block=$(jq -ec .block <<< "$work_result") || return 1
+        block_hash=$(jq -er .hash <<< "$work_result") || return 1
+        signature=$(jq -er .signature <<< "$native_work_block") || return 1
+    fi
     
     # 7. 将新区块存入本地数据库 (Store the new block in the local database)
     local parent_weight total_weight
     parent_weight=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT total_weight FROM blocks WHERE hash=%s;" "$latest_hash") || return 1
-    [[ "$stake" =~ ^[1-9][0-9]{0,18}$ ]] && [ "$stake" -le "$((9223372036854775807-parent_weight))" ] || return 1
-    total_weight=$((parent_weight+stake))
+    if [ "$work_mode" = pow-v2 ]; then
+        total_weight=$(jq -er .total_weight <<< "$work_result") || return 1
+    else
+        [[ "$stake" =~ ^[1-9][0-9]{0,18}$ ]] && [ "$stake" -le "$((9223372036854775807-parent_weight))" ] || return 1
+        total_weight=$((parent_weight+stake))
+    fi
     db_execute_safe "$BLOCKCHAIN_DB" \
         "INSERT INTO blocks (height, hash, previous_hash, timestamp, validator, signature, transactions,total_weight) VALUES (%d, %s, %s, %d, %s, %s, %s,%d);" \
         "$height" "$block_hash" "$latest_hash" "$timestamp" "$validator_id" "$signature" "$tx_json" "$total_weight" || return 1
@@ -27050,6 +27401,10 @@ blockchain_mine_block() (
     CORIUM_TEMP_ITEMS+=("$temp_block_file")
     # 创建完整的区块JSON对象，用于网络共享 (Create a complete block JSON object for network sharing)
     local full_block_json="{\"height\":$height,\"previous_hash\":\"$latest_hash\",\"timestamp\":$timestamp,\"validator\":\"$validator_id\",\"signature\":\"$signature\",\"transactions\":$tx_json}"
+    if [ "$work_mode" = pow-v2 ]; then
+        full_block_json="$native_work_block"
+        _corium_work_consensus record "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$full_block_json" "$block_hash" >/dev/null || return 1
+    fi
     echo "$full_block_json" > "$temp_block_file"
     
     # p2p_split_file 使用文件内容计算哈希，这必须与我们的 block_hash 匹配
@@ -28025,6 +28380,10 @@ p2p_reconstruct_file() {
 # 这是最底层的网络传输函数的、最终的、生产就绪版本。
 _internal_verify_object_hash() {
     [[ "$1" =~ ^[a-f0-9]{64}$ ]] || return 1
+    if jq -e 'type=="object" and has("work")' "$2" >/dev/null 2>&1; then
+        _corium_work_consensus verify-file "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$2" "$1" >/dev/null
+        return $?
+    fi
     "${PYTHON_CMD}" - "$2" "$1" "$BLOCKCHAIN_DB" <<'PY_OBJECT_VERIFY'
 def verify_object_file(path, expected, chain_path):
     import hashlib,json,sqlite3,pathlib,re
@@ -31491,6 +31850,10 @@ _init_blockchain_db() {
         block_height INTEGER
     );
     CREATE INDEX IF NOT EXISTS transactions_block_height_hash ON transactions(block_height, hash);
+    CREATE TABLE IF NOT EXISTS block_work (
+        hash TEXT PRIMARY KEY,
+        proof TEXT NOT NULL
+    );
     
     -- 链状态表 (Chain State Table)
     CREATE TABLE IF NOT EXISTS chain_state (
@@ -40968,6 +41331,7 @@ _update_chain_state_cache() {
                         "$tx_hash" "$sender_id" "$recipient_id" "$mail_object_hash" "$tx_timestamp"
                     ;;
                 "submit_math_proof")
+                    [ "$(db_query_safe "$BLOCKCHAIN_DB" "SELECT pkg_id FROM compute_engines WHERE engine_id=%s;" "$(jq -r .engine_id <<< "$tx_payload")")" != consensus/work-weight:2 ] || return 1
                     if [ "$(db_query_safe "$BLOCKCHAIN_DB" "SELECT pkg_id FROM compute_engines WHERE engine_id=%s;" "$(jq -r .engine_id <<< "$tx_payload")")" = compute/openci-attested:1 ]; then
                         _corium_openci_consensus validate "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$tx_payload" "$sender_id" "$height" >/dev/null || return 1
                     fi
@@ -42221,6 +42585,9 @@ with target:
         txs = json.loads(b[6])
         if not isinstance(txs,list) or len(txs)!=len(set(txs)): raise ValueError('Duplicate or malformed transaction list')
         target.execute('INSERT INTO blocks VALUES (?,?,?,?,?,?,?,?)', b)
+        if source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='block_work'").fetchone():
+            proof=source.execute('SELECT proof FROM block_work WHERE hash=?',(b[1],)).fetchone()
+            if proof:target.execute('INSERT INTO block_work VALUES(?,?)',(b[1],proof[0]))
         for txhash in txs:
             if txhash in seen: raise ValueError('Replayed canonical transaction')
             seen.add(txhash)
@@ -42264,15 +42631,25 @@ PY_SAVE_BLOCKS
         weight=$(jq -er '.[7]' <<< "$block_row") || return 1
         [[ "$timestamp" =~ ^[0-9]{1,16}$ ]] && [ "$timestamp" -ge "$parent_time" ] || return 1
         body="{\"height\":$bh,\"previous_hash\":\"$previous\",\"timestamp\":$timestamp,\"transactions\":$transactions}"
-        [ "$(_internal_hash_text "$body")" = "$hash" ] || return 1
         _protocol_execute_scheduled_changes "$bh" || return 1
         _slashing_check_for_jailed_validators "$bh" || return 1
-        pubfile=$(_blockchain_get_validator_pubkey "$validator") || return 1
+        local replay_work_mode replay_work_proof replay_work_block replay_work_check
+        replay_work_mode=$(_corium_work_consensus mode "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$bh" | jq -er .mode) || return 1
+        if [ "$replay_work_mode" = pow-v2 ]; then
+            replay_work_proof=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT proof FROM block_work WHERE hash=%s;" "$hash") || return 1
+            replay_work_block=$(jq -cn --argjson row "$block_row" --argjson work "$replay_work_proof" '{height:$row[0],previous_hash:$row[2],timestamp:$row[3],validator:$row[4],signature:$row[5],transactions:($row[6]|fromjson),work:$work}') || return 1
+            replay_work_check=$(_corium_work_consensus verify "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$replay_work_block" "$hash") || return 1
+            [ "$weight" = "$(jq -er .total_weight <<< "$replay_work_check")" ] || return 1
+        else
+            [ -z "$(db_query_safe "$BLOCKCHAIN_DB" "SELECT proof FROM block_work WHERE hash=%s;" "$hash")" ] || return 1
+            [ "$(_internal_hash_text "$body")" = "$hash" ] || return 1
+            pubfile=$(_blockchain_get_validator_pubkey "$validator") || return 1
         verify_signature "$body" "$signature" "$pubfile" || return 1
         local stake
         stake=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT stake FROM validators WHERE public_key_hash=%s AND status='active';" "$validator") || return 1
         [[ "$stake" =~ ^[1-9][0-9]{0,18}$ ]] && [ "$stake" -le "$((9223372036854775807-parent_weight))" ] || return 1
         [ "$weight" -eq "$((parent_weight+stake))" ] || return 1
+        fi
         local -A block_tracker=()
         while IFS= read -r txhash; do
             [ -n "$txhash" ] || continue
