@@ -1,0 +1,37 @@
+name: Native OpenCI governance and settlement
+on:
+  push:
+    paths: ['corix_v108.sh', 'openci_consensus.py', 'test_openci_consensus.py', '.github/workflows/openci-consensus.yml']
+  pull_request:
+    paths: ['corix_v108.sh', 'openci_consensus.py', 'test_openci_consensus.py', '.github/workflows/openci-consensus.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: openci-consensus-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native-settlement:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Native runtime dependencies only
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 jq openssl rsync curl gnupg
+          python -m pip install --only-binary=:all: cryptography==50.0.1
+      - name: Real native governance, activation, challenge window, settlement and Phoenix replay
+        env:
+          CORIUM_OPENCI_LIVE_CHAIN: '1'
+        run: |
+          set -o pipefail
+          python -m unittest -v test_openci_consensus 2>&1 | tee native-openci-consensus.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-openci-governance-settlement
+          path: native-openci-consensus.txt
