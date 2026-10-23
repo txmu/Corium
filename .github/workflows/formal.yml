@@ -15,7 +15,8 @@ jobs:
         with:
           python-version: '3.13'
       - name: Formula comparison dependency
-        run: python -m pip install --only-binary=:all: cryptography
+        run: |
+          python -m pip install --only-binary=:all: cryptography
       - name: Install pinned Lean 4.19.0
         shell: bash
         run: |
