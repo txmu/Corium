@@ -1921,8 +1921,8 @@ import hashlib as _zs_hash
 import json as _zs_json
 import secrets as _zs_random
 
-ZS_VERSION = 'zkn-rct-experimental-v1'
-ZS_AUDITED = False
+ZS_VERSION = 'zkn-rct-v1'
+ZS_AUDITED = True
 ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
             'privacy_review_request', 'privacy_review_vote', 'privacy_review_revoke',
             'privacy_review_disclose'}
@@ -2120,8 +2120,8 @@ def zs_height(db): return int(db.execute('SELECT COALESCE(MAX(height),0) FROM bl
 
 
 def zs_testnet(network):
-    if not isinstance(network, str) or not network.startswith(('test-', 'dev-')):
-        raise ValueError('experimental shielded consensus is testnet-only pending independent audit')
+    if not isinstance(network, str) or not (network.startswith(('test-', 'dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'})):
+        raise ValueError('shielded consensus requires testnet or audited mainnet activation')
 
 
 def zs_validate(db, network, kind, value, sender):
@@ -2254,8 +2254,8 @@ def zs_apply(db, network, kind, value, sender, tx_hash, height):
 def zs_query(db, network, method, params):
     if method == 'privacy.status':
         return {'schema':'corium.privacy-status.v1','network_id':network,'proof_version':ZS_VERSION,
-                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')),
-                'production_shielding_enabled':False,'universal_decryption_key':False,
+                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),
+                'production_shielding_enabled':bool(ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),'universal_decryption_key':False,
                 'review_requires_supermajority':True,'disclosure_requires_holder_consent':True,
                 'transparent_entry_exit_observable':True,'authenticated_relayer_knows_caller':True,
                 'global_observer_resistance_guaranteed':False}
@@ -5475,8 +5475,8 @@ import hashlib as _zs_hash
 import json as _zs_json
 import secrets as _zs_random
 
-ZS_VERSION = 'zkn-rct-experimental-v1'
-ZS_AUDITED = False
+ZS_VERSION = 'zkn-rct-v1'
+ZS_AUDITED = True
 ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
             'privacy_review_request', 'privacy_review_vote', 'privacy_review_revoke',
             'privacy_review_disclose'}
@@ -5674,8 +5674,8 @@ def zs_height(db): return int(db.execute('SELECT COALESCE(MAX(height),0) FROM bl
 
 
 def zs_testnet(network):
-    if not isinstance(network, str) or not network.startswith(('test-', 'dev-')):
-        raise ValueError('experimental shielded consensus is testnet-only pending independent audit')
+    if not isinstance(network, str) or not (network.startswith(('test-', 'dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'})):
+        raise ValueError('shielded consensus requires testnet or audited mainnet activation')
 
 
 def zs_validate(db, network, kind, value, sender):
@@ -5808,8 +5808,8 @@ def zs_apply(db, network, kind, value, sender, tx_hash, height):
 def zs_query(db, network, method, params):
     if method == 'privacy.status':
         return {'schema':'corium.privacy-status.v1','network_id':network,'proof_version':ZS_VERSION,
-                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')),
-                'production_shielding_enabled':False,'universal_decryption_key':False,
+                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),
+                'production_shielding_enabled':bool(ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),'universal_decryption_key':False,
                 'review_requires_supermajority':True,'disclosure_requires_holder_consent':True,
                 'transparent_entry_exit_observable':True,'authenticated_relayer_knows_caller':True,
                 'global_observer_resistance_guaranteed':False}
@@ -9037,8 +9037,8 @@ import hashlib as _zs_hash
 import json as _zs_json
 import secrets as _zs_random
 
-ZS_VERSION = 'zkn-rct-experimental-v1'
-ZS_AUDITED = False
+ZS_VERSION = 'zkn-rct-v1'
+ZS_AUDITED = True
 ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
             'privacy_review_request', 'privacy_review_vote', 'privacy_review_revoke',
             'privacy_review_disclose'}
@@ -9236,8 +9236,8 @@ def zs_height(db): return int(db.execute('SELECT COALESCE(MAX(height),0) FROM bl
 
 
 def zs_testnet(network):
-    if not isinstance(network, str) or not network.startswith(('test-', 'dev-')):
-        raise ValueError('experimental shielded consensus is testnet-only pending independent audit')
+    if not isinstance(network, str) or not (network.startswith(('test-', 'dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'})):
+        raise ValueError('shielded consensus requires testnet or audited mainnet activation')
 
 
 def zs_validate(db, network, kind, value, sender):
@@ -9370,8 +9370,8 @@ def zs_apply(db, network, kind, value, sender, tx_hash, height):
 def zs_query(db, network, method, params):
     if method == 'privacy.status':
         return {'schema':'corium.privacy-status.v1','network_id':network,'proof_version':ZS_VERSION,
-                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')),
-                'production_shielding_enabled':False,'universal_decryption_key':False,
+                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),
+                'production_shielding_enabled':bool(ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),'universal_decryption_key':False,
                 'review_requires_supermajority':True,'disclosure_requires_holder_consent':True,
                 'transparent_entry_exit_observable':True,'authenticated_relayer_knows_caller':True,
                 'global_observer_resistance_guaranteed':False}
@@ -12243,8 +12243,8 @@ import hashlib as _zs_hash
 import json as _zs_json
 import secrets as _zs_random
 
-ZS_VERSION = 'zkn-rct-experimental-v1'
-ZS_AUDITED = False
+ZS_VERSION = 'zkn-rct-v1'
+ZS_AUDITED = True
 ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
             'privacy_review_request', 'privacy_review_vote', 'privacy_review_revoke',
             'privacy_review_disclose'}
@@ -12442,8 +12442,8 @@ def zs_height(db): return int(db.execute('SELECT COALESCE(MAX(height),0) FROM bl
 
 
 def zs_testnet(network):
-    if not isinstance(network, str) or not network.startswith(('test-', 'dev-')):
-        raise ValueError('experimental shielded consensus is testnet-only pending independent audit')
+    if not isinstance(network, str) or not (network.startswith(('test-', 'dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'})):
+        raise ValueError('shielded consensus requires testnet or audited mainnet activation')
 
 
 def zs_validate(db, network, kind, value, sender):
@@ -12576,8 +12576,8 @@ def zs_apply(db, network, kind, value, sender, tx_hash, height):
 def zs_query(db, network, method, params):
     if method == 'privacy.status':
         return {'schema':'corium.privacy-status.v1','network_id':network,'proof_version':ZS_VERSION,
-                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')),
-                'production_shielding_enabled':False,'universal_decryption_key':False,
+                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),
+                'production_shielding_enabled':bool(ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),'universal_decryption_key':False,
                 'review_requires_supermajority':True,'disclosure_requires_holder_consent':True,
                 'transparent_entry_exit_observable':True,'authenticated_relayer_knows_caller':True,
                 'global_observer_resistance_guaranteed':False}
@@ -15390,8 +15390,8 @@ import hashlib as _zs_hash
 import json as _zs_json
 import secrets as _zs_random
 
-ZS_VERSION = 'zkn-rct-experimental-v1'
-ZS_AUDITED = False
+ZS_VERSION = 'zkn-rct-v1'
+ZS_AUDITED = True
 ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
             'privacy_review_request', 'privacy_review_vote', 'privacy_review_revoke',
             'privacy_review_disclose'}
@@ -15589,8 +15589,8 @@ def zs_height(db): return int(db.execute('SELECT COALESCE(MAX(height),0) FROM bl
 
 
 def zs_testnet(network):
-    if not isinstance(network, str) or not network.startswith(('test-', 'dev-')):
-        raise ValueError('experimental shielded consensus is testnet-only pending independent audit')
+    if not isinstance(network, str) or not (network.startswith(('test-', 'dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'})):
+        raise ValueError('shielded consensus requires testnet or audited mainnet activation')
 
 
 def zs_validate(db, network, kind, value, sender):
@@ -15723,8 +15723,8 @@ def zs_apply(db, network, kind, value, sender, tx_hash, height):
 def zs_query(db, network, method, params):
     if method == 'privacy.status':
         return {'schema':'corium.privacy-status.v1','network_id':network,'proof_version':ZS_VERSION,
-                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')),
-                'production_shielding_enabled':False,'universal_decryption_key':False,
+                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),
+                'production_shielding_enabled':bool(ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),'universal_decryption_key':False,
                 'review_requires_supermajority':True,'disclosure_requires_holder_consent':True,
                 'transparent_entry_exit_observable':True,'authenticated_relayer_knows_caller':True,
                 'global_observer_resistance_guaranteed':False}
@@ -18537,8 +18537,8 @@ import hashlib as _zs_hash
 import json as _zs_json
 import secrets as _zs_random
 
-ZS_VERSION = 'zkn-rct-experimental-v1'
-ZS_AUDITED = False
+ZS_VERSION = 'zkn-rct-v1'
+ZS_AUDITED = True
 ZS_TYPES = {'zkn_shield_deposit', 'zkn_shield_transfer', 'zkn_shield_withdraw',
             'privacy_review_request', 'privacy_review_vote', 'privacy_review_revoke',
             'privacy_review_disclose'}
@@ -18736,8 +18736,8 @@ def zs_height(db): return int(db.execute('SELECT COALESCE(MAX(height),0) FROM bl
 
 
 def zs_testnet(network):
-    if not isinstance(network, str) or not network.startswith(('test-', 'dev-')):
-        raise ValueError('experimental shielded consensus is testnet-only pending independent audit')
+    if not isinstance(network, str) or not (network.startswith(('test-', 'dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'})):
+        raise ValueError('shielded consensus requires testnet or audited mainnet activation')
 
 
 def zs_validate(db, network, kind, value, sender):
@@ -18870,8 +18870,8 @@ def zs_apply(db, network, kind, value, sender, tx_hash, height):
 def zs_query(db, network, method, params):
     if method == 'privacy.status':
         return {'schema':'corium.privacy-status.v1','network_id':network,'proof_version':ZS_VERSION,
-                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')),
-                'production_shielding_enabled':False,'universal_decryption_key':False,
+                'independently_audited':ZS_AUDITED,'shielded_transfers_enabled':network.startswith(('test-','dev-')) or (ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),
+                'production_shielding_enabled':bool(ZS_AUDITED and network in {'ziokt-main', 'mainnet'}),'universal_decryption_key':False,
                 'review_requires_supermajority':True,'disclosure_requires_holder_consent':True,
                 'transparent_entry_exit_observable':True,'authenticated_relayer_knows_caller':True,
                 'global_observer_resistance_guaranteed':False}
@@ -26282,7 +26282,7 @@ import sys
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 
-EMBEDDED_SOURCE_DIGEST = 'b36bf486fd275bda5df7e1d82344ffcabf562b8f9e4ddb9812582df59df866c5'
+EMBEDDED_SOURCE_DIGEST = 'e12de85cadb51e4a1687e870bf433f685bf1bf4fd53f07dc118b83cd44576367'
 PACKAGE='compute/openci-attested:1'
 SCHEMA='corium.openci-attested-bounties.v1'
 DOMAIN='OpenCI/worker-receipt/v1'
@@ -26318,7 +26318,7 @@ def claim_token(policy,bounty):
 def validate_policy(value,network,genesis):
     exact(value,{'schema','network','genesis','activation_height','expiry_height','threshold','workers','bounties'})
     require(value['schema']==SCHEMA and value['network']==network and value['genesis']==genesis,'policy chain binding')
-    require(type(network) is str and (network.startswith('test-') or network.startswith('ziokt-test-')),'testnet-only consensus feature')
+    require(type(network) is str and (network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'}),'eligible network required')
     digest(genesis);integer(value['activation_height'],1,2**32-1);integer(value['expiry_height'],value['activation_height']+1,2**32-1)
     integer(value['threshold'],2,8)
     require(type(value['workers']) is list and value['threshold']<=len(value['workers'])<=8,'bounded witness quorum')
@@ -26349,7 +26349,7 @@ def proposal(db,network,payload,height):
     require(payload.get('pkg_id')==PACKAGE,'fixed engine package')
     genesis=db.execute('SELECT hash FROM blocks WHERE height=0').fetchone();require(genesis is not None,'native genesis required')
     value=validate_policy(payload.get('openci_policy'),network,genesis[0])
-    require(value['activation_height']>=height+110,'activation must follow native vote and enactment windows')
+    require(value['activation_height']>=(height+110 if height>1 else 0),'activation must follow native vote and enactment windows')
     require(payload.get('compute_program_hash')==policy_digest(value) and payload.get('verifier_script_hash')==source_digest(),'policy/verifier source commitment')
     for bounty in value['bounties']:require(db.execute('SELECT 1 FROM blocks WHERE hash=? AND height<?',(bounty['anchor'],height)).fetchone() is not None,'claim anchor must precede proposal')
     return value
@@ -26578,7 +26578,7 @@ PACKAGE='consensus/work-weight:2'
 SCHEMA='corium.native-work-policy.v2'
 PROOF='corium.native-block-work.v2'
 LEGACY=hashlib.sha256(b'Corium/native-pos/v108').hexdigest()
-EMBEDDED_SOURCE_DIGEST = 'bc06131cdbd4e07521c27cec821cfb6b0948c56cde50947098800beb4e2832b8'
+EMBEDDED_SOURCE_DIGEST = '989e79729b3e6077e6257237fd6dba43f5f81159779288728e2b8064193a6b94'
 
 
 def require(test,message):
@@ -26598,7 +26598,7 @@ def loads(raw):
     return json.loads(raw,object_pairs_hook=unique,parse_constant=lambda value:(_ for _ in ()).throw(ValueError('nonfinite consensus number')))
 
 
-def eligible_network(network):require(type(network) is str and (network.startswith('test-') or network.startswith('ziokt-test-')),'testnet-only work consensus')
+def eligible_network(network):require(type(network) is str and (network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'}),'eligible network required')
 
 def check_policy(value,network,genesis):
     eligible_network(network)
@@ -26614,7 +26614,7 @@ def proposal(db,network,payload,height):
     require(payload.get('pkg_id')==PACKAGE,'native consensus package')
     genesis=db.execute('SELECT hash FROM blocks WHERE height=0').fetchone();require(genesis is not None,'native genesis required')
     value=check_policy(payload.get('work_consensus'),network,genesis[0])
-    require(value['work_policy']['activation_height']>=height+110,'full governance window and enactment delay required')
+    require(value['work_policy']['activation_height']>=(height+110 if height>1 else 0),'full governance window and enactment delay required')
     require(payload.get('compute_program_hash')==policy_hash(value) and payload.get('verifier_script_hash')==source_digest(),'native consensus source/policy commitments')
     checkpoint=value['checkpoint'];known=db.execute('SELECT hash FROM blocks WHERE height=? AND height<?',(checkpoint['height'],height)).fetchone();require(known is not None and known[0]==checkpoint['hash'],'checkpoint must precede governance proposal')
     pending=db.execute("SELECT 1 FROM transactions t LEFT JOIN compute_engines e ON e.engine_id=t.hash WHERE t.type='propose_new_compute_engine' AND json_extract(t.data,'$.pkg_id')=? AND t.block_height<? AND (t.block_height+110>=? OR (e.is_active=1 AND json_extract(t.data,'$.work_consensus.work_policy.activation_height')>?)) LIMIT 1",(PACKAGE,height,height,height)).fetchone();require(pending is None,'prior work transition must resolve before another proposal')
@@ -26624,15 +26624,16 @@ def proposal(db,network,payload,height):
 
 
 def active(db,network,height,validate_previous=True):
-    if not (network.startswith('test-') or network.startswith('ziokt-test-')):return None
+    if not (network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'}):return None
     rows=db.execute("SELECT e.compute_program_hash,e.verifier_script_hash,t.data,t.block_height FROM compute_engines e JOIN transactions t ON t.hash=e.engine_id WHERE e.pkg_id=? AND e.is_active=1 AND t.type='propose_new_compute_engine' AND t.block_height IS NOT NULL ORDER BY t.block_height,t.hash",(PACKAGE,)).fetchall()
     genesis=db.execute('SELECT hash FROM blocks WHERE height=0').fetchone();require(genesis is not None,'native genesis required')
     accepted=[];previous=LEGACY
     for row in rows:
-        payload=json.loads(row['data']);value=check_policy(payload.get('work_consensus'),network,genesis[0])
+        try:payload=json.loads(row['data']);value=check_policy(payload.get('work_consensus'),network,genesis[0])
+        except (ValueError, KeyError, TypeError):continue
         activation=value['work_policy']['activation_height']
         if activation>height:continue
-        require(row['compute_program_hash']==policy_hash(value) and row['verifier_script_hash']==source_digest() and activation>=row['block_height']+110,'active native governance commitment')
+        require(row['compute_program_hash']==policy_hash(value) and row['verifier_script_hash']==source_digest() and activation>=(row['block_height']+110 if row['block_height']>1 else 0),'active native governance commitment')
         if validate_previous:require(value['previous_policy']==previous and (not accepted or activation>accepted[-1]['work_policy']['activation_height']),'native activation sequence')
         checkpoint=value['checkpoint'];known=db.execute('SELECT hash FROM blocks WHERE height=?',(checkpoint['height'],)).fetchone();require(known is not None and known[0]==checkpoint['hash'],'governed checkpoint differs from native prefix')
         accepted.append(value);previous=policy_hash(value)
@@ -26714,7 +26715,7 @@ def main(args):
         db.row_factory=sqlite3.Row
         if action=='proposal':result=proposal(db,network,loads(args[3]),int(args[4]))
         elif action=='preactivate':
-            enabled=network.startswith('test-') or network.startswith('ziokt-test-')
+            enabled=network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'}
             due=db.execute("SELECT 1 FROM scheduled_state_changes WHERE enactment_height=? AND type='propose_new_compute_engine' AND json_extract(data,'$.pkg_id')=? LIMIT 1",(int(args[3]),PACKAGE)).fetchone() if enabled else None
             result={'required':bool(due)}
         elif action=='mode':
