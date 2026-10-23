@@ -1,3 +1,5 @@
+> 2026-10-23 修正：当前验证范围、修复与部署证据以 [SECURITY-REMEDIATION-2026-10-23.md](SECURITY-REMEDIATION-2026-10-23.md) 为准。旧文中的模型测试结果不能作为真实多运营者验收或完整无信任历史验证结论。
+
 # Corium v108：补全、加固与验证
 
 源码仍为单一 `corix_v108.sh`，版本保持 108。没有新增产品命令、网络消息类型或产品子系统；原生中文 + English UI 及第三语言模板机制保留。源码明确声明的 PoW placeholder、P2P simulator 与 genesis signature bootstrap 设计未被改成另一种共识设计。

@@ -1,6 +1,6 @@
 # Corium 精简算法模型
 
-运行：`bash formal/check.sh`（在仓库根目录，Lean 4.19.0；仅依赖 Init）。
+运行：`bash formal/check_all_formal.sh`（在仓库根目录，Lean 4.19.0；仅依赖 Init）。
 
 新增源码对应模型位于 `Implementation.lean` 和 `Refinements.lean`。
 原 `Models.lean` 保留为首轮简化模型，不代表生产实现。
@@ -23,3 +23,5 @@ Bash/Python/SQL 到 Lean 的机械等价证明，不能宣称完整源码符合�
 首轮 17 个定理已用 Lean 4.19.0 检查通过；新增证明使用相同版本与公理审计。
 核心定理的公理审计仅出现 Lean 标准的 `propext`、`Quot.sound`，或无公理依赖。
 这些是首轮核心性质，不能据此宣称相应生产模块已被完整验证。
+
+完整入口检查九个模块；旧入口转发至完整入口。精确定理声明及前提由 [THEOREMS.md](THEOREMS.md) 自动生成并检查漂移。

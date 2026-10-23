@@ -11,6 +11,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Formula comparison dependency
+        run: python -m pip install --only-binary=:all: cryptography
       - name: Install pinned Lean 4.19.0
         shell: bash
         run: |
@@ -35,3 +40,13 @@ jobs:
             formal/source-map.json
           if-no-files-found: error
           retention-days: 14
+  formal-release-gate:
+    name: formal-release-gate
+    needs: lean
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the complete formal job
+        env:
+          FORMAL_RESULT: ${{ needs.lean.result }}
+        run: test "$FORMAL_RESULT" = success

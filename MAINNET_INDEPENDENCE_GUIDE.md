@@ -1,3 +1,5 @@
+> 2026-10-23 修正：当前验证范围、修复与部署证据以 [SECURITY-REMEDIATION-2026-10-23.md](SECURITY-REMEDIATION-2026-10-23.md) 为准。旧文中的模型测试结果不能作为真实多运营者验收或完整无信任历史验证结论。
+
 # Ziokt Sovereign Network: Mainnet Independence & Node Operator Guide
 
 **Network ID**: `ziokt-main`  

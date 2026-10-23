@@ -1,5 +1,6 @@
 """Unit and integration tests for ConsensusValidationCore."""
 import json
+import copy
 import os
 import shutil
 import sqlite3
@@ -20,7 +21,8 @@ from consensus_core import (
     MIN_TARGET,
     TARGET_SPACING,
     RETARGET_INTERVAL,
-    WORK_V2_ACTIVATION_HEIGHT
+    WORK_V2_ACTIVATION_HEIGHT,
+    sha256_hex
 )
 
 
@@ -165,6 +167,45 @@ class TestConsensusCore(unittest.TestCase):
             self.core.verify_block_integrity(forged_block, res['hash'])
         self.assertIn('INVALID_SIGNATURE', str(cm.exception))
 
+    def test_low_work_fork_cannot_claim_high_weight(self):
+        key = ec.generate_private_key(ec.SECP256K1())
+        pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption())
+        genesis = self.core.get_block_by_height(0)
+        honest = self.core.mine_candidate_block(pem, genesis['hash'], genesis['timestamp'] + 60, [])
+        target = honest['target']
+        honest_tip = {'hash': 'f' * 64, 'total_weight': 2 * calculate_block_work(target)}
+
+        # Re-mine the changed body at the network's EASY target, then sign it
+        # with the legitimate miner key. Rejection must not rely on stale PoW/signatures.
+        for claimed in (1, target + 1, str(target), True, None, 'absent'):
+            with self.subTest(claimed=claimed):
+                block = copy.deepcopy(honest['block'])
+                if claimed == 'absent':
+                    del block['work']['target']
+                else:
+                    block['work']['target'] = claimed
+                context = self.core.work_context(block)
+                for nonce in range(100000):
+                    digest = self.core.calculate_work_digest(block['work']['policy'], context, nonce)
+                    if 1 < int(digest, 16) <= target:
+                        break
+                else:
+                    self.fail('Could not mine adversarial test block')
+                block['work']['nonce'] = nonce
+                raw = self.core.signing_bytes(block)
+                block['signature'] = key.sign(raw, ec.ECDSA(hashes.SHA256())).hex()
+                self.assertTrue(self.core.verify_miner_signature(block, raw))
+                identity = sha256_hex(raw)
+                if claimed == 'absent':
+                    result = self.core.verify_block_integrity(block, identity)
+                    self.assertEqual(result['block_work'], calculate_block_work(target))
+                    self.assertFalse(self.core.should_reorganize(result, honest_tip))
+                else:
+                    with self.assertRaises(ConsensusError) as failure:
+                        self.core.verify_block_integrity(block, identity)
+                    self.assertEqual(failure.exception.code, 'TARGET_MISMATCH')
+
     def test_fork_choice_rule(self):
         # Tip A at height 1 with weight 1000, Tip B at height 2 with weight 2000
         with self.core.get_connection() as db:
@@ -267,6 +308,20 @@ class TestConsensusCore(unittest.TestCase):
         next_target = self.core.get_expected_target(tip['height'], tip['hash'], tip['timestamp'])
         self.assertLess(next_target, initial_target)
         self.assertGreaterEqual(bits_from_target(next_target), bits_from_target(initial_target))
+
+        # Persisted miner metadata must not control future difficulty. This also
+        # covers old accepted proofs with target omitted after a retarget boundary.
+        with self.core.connection_scope() as db:
+            proof = json.loads(db.execute('SELECT proof FROM block_work WHERE hash=?', (tip['hash'],)).fetchone()[0])
+            for claimed in (1, None):
+                if claimed is None:
+                    proof.pop('target', None)
+                else:
+                    proof['target'] = claimed
+                db.execute('UPDATE block_work SET proof=? WHERE hash=?', (json.dumps(proof), tip['hash']))
+                # get_expected_target uses a different reader, so commit each fixture mutation.
+                db.commit()
+                self.assertEqual(self.core.get_expected_target(tip['height'], tip['hash'], tip['timestamp']), next_target)
 
 
 if __name__ == '__main__':

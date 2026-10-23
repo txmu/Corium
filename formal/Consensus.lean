@@ -152,4 +152,86 @@ theorem unstaked_miner_pow_independence
     powValid ⟨h, m2, target, nonceDigest⟩ := by
   exact h_valid
 
+/- A protocol interface model. The trusted context must be reconstructed from
+accepted history by the caller. Signature/transaction booleans stand for results
+of concrete verifiers; this does not prove those cryptographic implementations. -/
+structure GovernedContext where
+  parentHeight : Nat
+  parentHash : Nat
+  parentWork : Nat
+  activationHeight : Nat
+  policyApproved : Bool
+  expectedTarget : Nat
+
+structure SignedCandidate where
+  height : Nat
+  previousHash : Nat
+  minerPublicKey : Nat
+  claimedTarget : Option Nat
+  nonceDigest : Nat
+  signatureVerified : Bool
+  transactionsVerified : Bool
+
+def protocolValid (s : GovernedContext) (b : SignedCandidate) : Prop :=
+  s.policyApproved = true ∧ b.height ≥ s.activationHeight ∧
+  b.height = s.parentHeight + 1 ∧ b.previousHash = s.parentHash ∧
+  validTarget s.expectedTarget ∧ b.signatureVerified = true ∧
+  b.transactionsVerified = true ∧ b.nonceDigest ≤ s.expectedTarget ∧
+  (b.claimedTarget = none ∨ b.claimedTarget = some s.expectedTarget)
+
+instance (s : GovernedContext) (b : SignedCandidate) : Decidable (protocolValid s b) :=
+  by unfold protocolValid validTarget; infer_instance
+
+def validateAndCredit (s : GovernedContext) (b : SignedCandidate) : Option Nat :=
+  if protocolValid s b then some (s.parentWork + blockWork s.expectedTarget) else none
+
+theorem credited_work_uses_governed_target (s : GovernedContext) (b : SignedCandidate)
+    (total : Nat) (h : validateAndCredit s b = some total) :
+    protocolValid s b ∧ total = s.parentWork + blockWork s.expectedTarget := by
+  unfold validateAndCredit at h
+  split at h
+  · rename_i valid
+    exact ⟨valid, (Option.some.inj h).symm⟩
+  · contradiction
+
+theorem false_target_cannot_receive_credit (s : GovernedContext) (b : SignedCandidate)
+    (claimed : Nat) (hclaim : b.claimedTarget = some claimed)
+    (hdiff : claimed ≠ s.expectedTarget) : validateAndCredit s b = none := by
+  have invalid : ¬ protocolValid s b := by
+    intro valid
+    rcases valid.2.2.2.2.2.2.2.2 with absent | equal
+    · rw [hclaim] at absent
+      contradiction
+    · rw [hclaim] at equal
+      exact hdiff (Option.some.inj equal)
+  simp [validateAndCredit, invalid]
+
+-- These model entrypoints intentionally delegate to one kernel. Production
+-- equivalence requires demonstrating this delegation and equal reconstructed inputs.
+def acceptBlock (s : GovernedContext) (b : SignedCandidate) := validateAndCredit s b
+def syncBlock (s : GovernedContext) (b : SignedCandidate) := validateAndCredit s b
+def replayBlock (s : GovernedContext) (b : SignedCandidate) := validateAndCredit s b
+def reorgBlock (historical : GovernedContext) (b : SignedCandidate) := validateAndCredit historical b
+
+theorem validation_entrypoints_agree (s : GovernedContext) (b : SignedCandidate) :
+    acceptBlock s b = syncBlock s b ∧ syncBlock s b = replayBlock s b ∧
+    replayBlock s b = reorgBlock s b := by
+  exact ⟨rfl, rfl, rfl⟩
+
+def registeredAdmission (s : GovernedContext) (b : SignedCandidate)
+    (_validatorRegistry : List Nat) := validateAndCredit s b
+
+theorem signed_block_registry_independence (s : GovernedContext) (b : SignedCandidate)
+    (oldRegistry newRegistry : List Nat) :
+    registeredAdmission s b oldRegistry = registeredAdmission s b newRegistry := by
+  rfl
+
+def targetAtHeight (oldTarget newTarget activation height : Nat) : Nat :=
+  if height < activation then oldTarget else newTarget
+
+theorem governance_target_not_retroactive (oldTarget newTarget activation height : Nat)
+    (before : height < activation) :
+    targetAtHeight oldTarget newTarget activation height = oldTarget := by
+  simp [targetAtHeight, before]
+
 end Ziokt.Consensus

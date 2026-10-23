@@ -1,5 +1,6 @@
 """Real libsodium ABI, group arithmetic and experimental activation boundaries."""
 import unittest
+from unittest.mock import patch
 import shielded_ownership as s
 
 
@@ -25,10 +26,22 @@ class PrimitiveTests(unittest.TestCase):
         self.assertIsNone(lib.crypto_core_ristretto255_scalar_reduce.restype)
         self.assertIsNotNone(lib.crypto_core_ristretto255_from_hash.restype)
         for _ in range(16):self.assertNotEqual(s.zs_random_scalar(),bytes(32))
-    def test_mainnet_remains_unavailable_without_independent_audit(self):
+    def test_feature_enablement_is_not_independent_audit_evidence(self):
         self.assertFalse(s.ZS_AUDITED)
-        for network in ('ziokt-main','mainnet','testnet','test'):
-            with self.assertRaisesRegex(ValueError,'testnet-only'):s.zs_testnet(network)
-        for network in ('test-audit','dev-local'):s.zs_testnet(network)
+        for enabled in (False, True):
+            with patch.object(s, 'ZS_MAINNET_ENABLED', enabled):
+                for network in ('ziokt-main','mainnet'):
+                    if enabled:
+                        s.zs_testnet(network)
+                    else:
+                        with self.assertRaises(ValueError):s.zs_testnet(network)
+                    status=s.zs_query(None,network,'privacy.status',{})
+                    self.assertEqual(status['production_shielding_enabled'],enabled)
+                    self.assertFalse(status['independently_audited'])
+                    self.assertFalse(status['cryptographic_security_verified'])
+                    self.assertEqual(status['mainnet_governance_approval'],'not_verified')
+                for network in ('test-audit','dev-local'):s.zs_testnet(network)
+        for network in ('testnet','test','ziokt-main-fake',None):
+            with self.assertRaises(ValueError):s.zs_testnet(network)
 
 if __name__=='__main__':unittest.main()

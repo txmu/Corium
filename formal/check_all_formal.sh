@@ -7,20 +7,12 @@ cd "$ROOT"
 echo "=== [1/4] Verifying Lean 4 Toolchain ==="
 lean_version=$(lean --version)
 printf '%s\n' "$lean_version"
-[[ "$lean_version" =~ version\ 4\. ]]
+[[ "$lean_version" =~ version\ 4\.19\.0, ]]
+python3 formal/theorem_inventory.py
 
 echo "=== [2/4] Verifying Core and Sovereign Lean 4 Proof Modules ==="
-MODULES=(
-    "Models"
-    "Implementation"
-    "Refinements"
-    "Consensus"
-    "StateMachine"
-    "Governance"
-    "OpenCI"
-    "Privacy"
-    "ContentFabric"
-)
+module_list=$(python3 formal/theorem_inventory.py --modules)
+mapfile -t MODULES <<< "$module_list"
 
 audit_dir=$(mktemp -d)
 trap 'rm -rf "$audit_dir"' EXIT
@@ -68,7 +60,7 @@ if 'sorryAx' in text:
 PY
 done
 
-echo "=== [3/4] Running Formal Differential Tests (Lean 4 <-> Python Production) ==="
+echo "=== [3/4] Running Python comparisons against transcribed model formulas ==="
 python3 formal/test_lean_differential.py
 
 echo "=== [4/4] Verifying Source Correspondence ==="

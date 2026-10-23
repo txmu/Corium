@@ -220,35 +220,38 @@ class ConsensusValidationCore:
                 # Return static Work v2 target (difficulty_bits = 4)
                 return target_from_bits(4)
 
-            # Dynamic retargeting logic:
-            if candidate_height % RETARGET_INTERVAL != 0:
-                # Non-retarget block inherits target from parent
-                parent_proof = conn.execute('SELECT proof FROM block_work WHERE hash = ?', (parent_hash,)).fetchone()
-                if parent_proof:
-                    proof_data = json.loads(parent_proof[0])
-                    if 'target' in proof_data:
-                        return int(proof_data['target'])
-                return target_from_bits(4)
+            # Reconstruct difficulty from the accepted ancestor timestamps. Never
+            # inherit a self-reported target, including from old persisted proofs.
+            # Walking hashes (rather than global heights) binds this to the branch.
+            ancestors = {}
+            cursor_hash = parent_hash
+            floor = max(0, dyn_activation - RETARGET_INTERVAL)
+            while True:
+                row = conn.execute(
+                    'SELECT height, previous_hash, timestamp FROM blocks WHERE hash = ?',
+                    (cursor_hash,)
+                ).fetchone()
+                if row is None:
+                    raise ConsensusError('MISSING_DIFFICULTY_HISTORY', 'Cannot reconstruct branch difficulty')
+                ancestors[row['height']] = row['timestamp']
+                if row['height'] <= floor:
+                    break
+                cursor_hash = row['previous_hash']
 
-            # Boundary block: recompute based on previous RETARGET_INTERVAL blocks
-            start_height = candidate_height - RETARGET_INTERVAL
-            start_row = conn.execute('SELECT timestamp FROM blocks WHERE height = ?', (start_height,)).fetchone()
-            if not start_row:
-                return target_from_bits(4)
-
-            start_timestamp = int(start_row[0])
-            actual_timespan = parent_timestamp - start_timestamp
-            expected_timespan = RETARGET_INTERVAL * TARGET_SPACING
-
-            # Read parent target
-            parent_target = target_from_bits(4)
-            parent_proof = conn.execute('SELECT proof FROM block_work WHERE hash = ?', (parent_hash,)).fetchone()
-            if parent_proof:
-                proof_data = json.loads(parent_proof[0])
-                if 'target' in proof_data:
-                    parent_target = int(proof_data['target'])
-
-            return calculate_retarget(parent_target, actual_timespan, expected_timespan)
+            target = target_from_bits(4)
+            for height in range(max(dyn_activation, activation_floor), candidate_height + 1):
+                if height % RETARGET_INTERVAL != 0:
+                    continue
+                start_height = height - RETARGET_INTERVAL
+                if start_height < 0:
+                    continue
+                if start_height not in ancestors or height - 1 not in ancestors:
+                    raise ConsensusError('MISSING_DIFFICULTY_HISTORY', 'Incomplete retarget window')
+                target = calculate_retarget(
+                    target, ancestors[height - 1] - ancestors[start_height],
+                    RETARGET_INTERVAL * TARGET_SPACING
+                )
+            return target
         finally:
             conn.close()
 
@@ -358,6 +361,10 @@ class ConsensusValidationCore:
 
         # Determine target
         expected_target = self.get_expected_target(parent['height'], prev_hash, parent['timestamp'])
+        # A miner's metadata cannot select the difficulty or the credited work.
+        # Older proofs may omit target; both formats use the same trusted value.
+        if 'target' in proof and (type(proof['target']) is not int or proof['target'] != expected_target):
+            raise ConsensusError('TARGET_MISMATCH', 'Proof target must equal the consensus target')
         ctx = self.work_context(block)
         work_hash = self.calculate_work_digest(proof['policy'], ctx, proof['nonce'])
 
@@ -373,13 +380,7 @@ class ConsensusValidationCore:
         self.verify_miner_signature(block, raw_bytes)
 
         # Calculate incremental block work and cumulative chain work
-        # In Work v2 (static mode): incremental work is 1000
-        # In Dynamic mode: incremental work is calculate_block_work(expected_target)
-        mode = self.get_consensus_mode(height)
-        if 'target' in proof:
-            block_work = calculate_block_work(int(proof['target']))
-        else:
-            block_work = 1000
+        block_work = calculate_block_work(expected_target)
 
         total_weight = parent['total_weight'] + block_work
 

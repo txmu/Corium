@@ -62,7 +62,7 @@ class NativeWorkConsensusUnits(Fixture):
         for field,value in [('timestamp',112),('transactions',['b'*64]),('validator','c'*64),('height',112)]:
             changed=copy.deepcopy(block);changed[field]=value
             with self.subTest(field=field),self.assertRaises((ValueError,work.InvalidSignature)):self.verify(changed,candidate['hash'])
-        for field,value in [('nonce',block['work']['nonce']+1),('activation','d'*64),('schema','legacy')]:
+        for field,value in [('nonce',block['work']['nonce']+1),('activation','d'*64),('schema','legacy'),('target',1),('weight',2**255)]:
             changed=copy.deepcopy(block);changed['work'][field]=value
             with self.subTest(field=field),self.assertRaises((ValueError,work.InvalidSignature)):self.verify(changed,candidate['hash'])
         with self.assertRaises(ValueError):self.verify({**block,'total_weight':999999999},candidate['hash'])

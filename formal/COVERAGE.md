@@ -35,7 +35,7 @@
 
 ## 验证
 
-`bash formal/check.sh` 固定 Lean 4.19.0，检查三个文件、全部定理的公理依赖及源码漂移。
+`bash formal/check_all_formal.sh` 固定 Lean 4.19.0，检查全部九个模块、定理声明清单、公理依赖及源码漂移。旧 `check.sh` 转发到同一完整入口。
 不接受 `sorry`、`admit`、自定义公理或 native 计算引入的额外公理。
 
 `.github/workflows/formal.yml` 在 push/PR/手动触发时重新安装相同版本并运行同一入口。
@@ -45,3 +45,5 @@
 
 最初八个新增回归在本地运行通过；用户要求重量级测试交给 CI 后，不再在本地跑
 完整产品测试。最后提交的测试与源码结果以该提交的 CI 为准。
+
+当前精确声明及前提见 [THEOREMS.md](THEOREMS.md)；协议接口模型的边界见 [../FORMAL_VERIFICATION_REPORT.md](../FORMAL_VERIFICATION_REPORT.md)。
