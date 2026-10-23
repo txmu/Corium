@@ -14,6 +14,12 @@
 | 语义状态 | `_internal_semantic_state` 的 row 排序/字段删除 | JSON 行编码字符串的实际排序模型与排列不变性；messages 的 is_read 删除；其他表保留字段 | 全部表排除规则、SQL NULL/BLOB/浮点、JSON 编码、schema、外层对象序列化及模型与 Python 字符串排序对应 |
 | XOR | `kademlia_distance` 的 `int(hex) ^ int(hex)` | 自然数 XOR 对称、256 bit 范围保持；旧模型还证明零值的逐 bit 判定 | 正则与十六进制解析、Python 执行与 Lean 的机械对应 |
 | replay/reorg | `_internal_replay_chain_state` / `_blockchain_reorganize_to` | 带失败返回的重放分段律；旧模型的纯重放/重组关系 | 所有交易类型的状态转移、前置历史验证、治理时序、临时目录、实际回滚、全流程对应 |
+| PoW 难度与权重 | `consensus_core.py` (calculate_retarget, calculate_block_work) | `Consensus.lean`: 动态难度调幅上下界、离散区块工作量严格正定、累计链工作严格单调递增、分叉选择确定性与反自反性、无抵押矿工 PoW 独立性 | 真实互联网网络时延分布、SHA-256 碰撞阻力（作为密码学公理假设） |
+| 状态机与迁移边界 | `_internal_replay_chain_state`、`applyBlock` | `StateMachine.lean`: 状态机确定性执行、无效 PoW 区块在 v2 激活后严格拒绝、转账余额守恒律、64高度迁移分界确定性、链重放单步归纳 | 底层数据库 I/O 故障、OS 崩溃与硬件掉电 |
+| PoS 治理与 PoW 分权 | `_protocol_execute_scheduled_changes`、`_protocol_vote` | `Governance.lean`: 治理提案时间锁约束（≥110高度延迟）、2/3 超级多数法定交集定理、PoS 权益无法绕过 PoW 目标检查 | 链下治理投票社交共识 |
+| OpenCI 计算证明 | `openci_consensus.py` | `OpenCI.lean`: 任务标识严格绑定、奖励受限不超分配上限、多域见证阈值约束、计算证明与 PoW 出块权语义严格独立 | 真实 Docker/WASM 沙箱执行隔离性假设 |
+| ZKN v2 隐私与所有权 | `shielded_ownership.py` | `Privacy.lean`: Key Image / Nullifier 唯一性防双花、Note 生命周期约束、隐匿转账拆分总价值守恒 | Ristretto255/MLSAG 底层零知识密码学假设 |
+| Content Fabric 内容网络 | `content_fabric.py` | `ContentFabric.lean`: CID 哈希完整性、篡改分块严格拒绝、跨节点副本数据一致性 | P2P DHT 路由表毒化与 Sybil 防护假设 |
 
 ## 这轮发现并修复的问题
 

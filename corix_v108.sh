@@ -22562,80 +22562,88 @@ _consensus_daemon_loop() {
         # 0. Sleep briefly to avoid high CPU usage
         sleep 5
         
-        # 1. 检查我们是否是验证者
-        # 1. Check if we are a validator
+        # 1. 检查节点身份公钥
+        # 1. Check node identity public key
         [ ! -f "$USER_PUBLIC_KEY_FILE" ] && continue
         local our_pubkey
         our_pubkey=$(cat "$USER_PUBLIC_KEY_FILE")
-        local our_stake
-        our_stake=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT stake FROM validators WHERE public_key = %s AND status = 'active';" "$our_pubkey")
-        [ -z "$our_stake" ] || [ "${our_stake:-0}" -le 0 ] && {
-            detail "[CONSENSUS-DAEMON] 非活跃验证者，进入监听模式。 / Not an active validator, entering listening mode."
-            sleep 30
-            continue
-        }
-
-        # 2. 确定下一个区块的提议者
-        # 2. Determine the proposer for the next block
-        local next_validator_pubkey
-        next_validator_pubkey=$(blockchain_get_next_validator)
-        if [ -z "$next_validator_pubkey" ]; then
-            warn "[CONSENSUS-DAEMON] 无法确定下一个验证者，1分钟后重试... / Could not determine next validator, retrying in 1 minute..."
-            sleep 60
-            continue
-        fi
         
         local latest_height
         latest_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE(MAX(height), -1) FROM blocks;")
+        local candidate_height=$((latest_height + 1))
 
-        # 3. 决策分支：是我们出块，还是监听他人出块
-        # 3. Decision Branch: Are we proposing or listening?
-        if [ "$our_pubkey" = "$next_validator_pubkey" ]; then
-            # --- 分支 A: 轮到我们创建区块 ---
-            # --- Branch A: It's our turn to create a block ---
-            info "[CONSENSUS-DAEMON] 轮到我们为区块 $((latest_height + 1)) 提议了。/ It is our turn to propose block $((latest_height + 1))."
-            # blockchain_mine_block 内部已经包含了重置我们自己 missed_blocks_counter 的逻辑
-            # The logic to reset our own missed_blocks_counter is already inside blockchain_mine_block
+        # 检查共识模式：PoW (Work v2) vs 传统 PoS
+        # Check consensus mode: PoW (Work v2) vs Legacy PoS
+        local daemon_work_mode="pos"
+        if type _corium_work_consensus >/dev/null 2>&1; then
+            daemon_work_mode=$(_corium_work_consensus mode "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$candidate_height" 2>/dev/null | jq -er .mode 2>/dev/null || echo "pos")
+        fi
+
+        # 检查本地挖矿开关与交易池：防止无交易时持续产生空块
+        if [ "${CORIUM_MINING_ENABLED:-1}" = "0" ] || [ -f "$CORIUM_ROOT/pause_mining" ]; then
+            detail "[CONSENSUS-DAEMON] 本地挖矿已暂停或禁用，进入监听模式。 / Local mining paused or disabled, entering listening mode."
+            sleep 10
+            continue
+        fi
+
+        local pending_tx_count
+        pending_tx_count=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COUNT(*) FROM transactions WHERE block_height IS NULL;")
+        if [ "${pending_tx_count:-0}" -eq 0 ] && [ "${CORIUM_ALLOW_EMPTY_BLOCKS:-0}" != "1" ] && [ ! -f "$CORIUM_ROOT/allow_empty_blocks" ]; then
+            detail "[CONSENSUS-DAEMON] 交易池无待处理交易，保持监听模式，不产生空区块。 / Mempool empty, staying in listening mode without empty block generation."
+            sleep 5
+            continue
+        fi
+
+        # 分共识模式处理：
+        if [ "$daemon_work_mode" = "pow-v2" ]; then
+            # --- 开放式 PoW 模式：无需质押，无需管理员许可，任何合法矿工均可独立打包与计算工作证明 ---
+            # --- Open PoW Mode: No stake or admin license required; any miner may package & compute PoW ---
+            info "[CONSENSUS-DAEMON] [PoW] 满足出块条件，开始为区块 $candidate_height 构建候选区块并挖矿... / Mining candidate block $candidate_height..."
             blockchain_mine_block
         else
-            # --- 分支 B: 监听其他验证者 ---
-            # --- Branch B: Listen for another validator ---
-            local next_validator_id
-            next_validator_id=$(_internal_hash_text "$next_validator_pubkey")
-            info "[CONSENSUS-DAEMON] 正在等待验证者 ${next_validator_id:0:16}... 为区块 $((latest_height + 1)) 提议... / Waiting for validator ${next_validator_id:0:16}... to propose block $((latest_height + 1))..."
-            
-            # 定义一个合理的等待超时（例如，30秒）
-            # Define a reasonable wait timeout (e.g., 30 seconds)
-            local timeout=30
-            local waited=0
-            
-            while [ "$waited" -lt "$timeout" ]; do
-                # 检查链的高度是否已经增加
-                # Check if the chain height has advanced
-                local new_height
-                new_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE(MAX(height), -1) FROM blocks;")
+            # --- 传统 PoS 模式（高度 < 64 历史兼容）：基于权益轮值出块 ---
+            # --- Legacy PoS Mode (< height 64 historical compatibility): Staked round-robin ---
+            local our_stake
+            our_stake=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT stake FROM validators WHERE public_key = %s AND status = 'active';" "$our_pubkey")
+            [ -z "$our_stake" ] || [ "${our_stake:-0}" -le 0 ] && {
+                detail "[CONSENSUS-DAEMON] 非活跃验证者，进入监听模式。 / Not an active validator, entering listening mode."
+                sleep 30
+                continue
+            }
 
-                if [ "$new_height" -gt "$latest_height" ]; then
-                    # 新区块已出现！跳出等待循环
-                    # A new block has appeared! Break the waiting loop.
-                    info "[CONSENSUS-DAEMON] 已收到新的区块 ${new_height}。/ New block ${new_height} received."
-                    break 2 # Break out of both inner while and outer while to start a new cycle
+            local next_validator_pubkey
+            next_validator_pubkey=$(blockchain_get_next_validator)
+            if [ -z "$next_validator_pubkey" ]; then
+                warn "[CONSENSUS-DAEMON] 无法确定下一个验证者，1分钟后重试... / Could not determine next validator, retrying in 1 minute..."
+                sleep 60
+                continue
+            fi
+
+            if [ "$our_pubkey" = "$next_validator_pubkey" ]; then
+                info "[CONSENSUS-DAEMON] 轮到我们为区块 $candidate_height 提议了。/ It is our turn to propose block $candidate_height."
+                blockchain_mine_block
+            else
+                local next_validator_id
+                next_validator_id=$(_internal_hash_text "$next_validator_pubkey")
+                info "[CONSENSUS-DAEMON] 正在等待验证者 ${next_validator_id:0:16}... 为区块 $candidate_height 提议... / Waiting for validator ${next_validator_id:0:16}... to propose block $candidate_height..."
+                local timeout=30
+                local waited=0
+                while [ "$waited" -lt "$timeout" ]; do
+                    local new_height
+                    new_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE(MAX(height), -1) FROM blocks;")
+                    if [ "$new_height" -ge "$candidate_height" ]; then
+                        info "[CONSENSUS-DAEMON] 区块 $candidate_height 已被网络提交。 / Block $candidate_height was committed by the network."
+                        break
+                    fi
+                    sleep 2
+                    waited=$((waited + 2))
+                done
+                if [ "$waited" -ge "$timeout" ]; then
+                    warn "[CONSENSUS-DAEMON] 等待超时！验证者 ${next_validator_id:0:16}... 未能按时提议区块。 / Wait timed out! Validator ${next_validator_id:0:16}... failed to propose a block in time."
+                    acquire_lock "network"
+                    _slashing_handle_missed_block "$next_validator_id" "$candidate_height"
+                    release_lock "network"
                 fi
-                
-                sleep 2
-                waited=$((waited + 2))
-            done
-
-            if [ "$waited" -ge "$timeout" ]; then
-                # --- 超时！这意味着预定的提议者错过了他们的轮次 ---
-                # --- TIMEOUT! This means the scheduled proposer missed their turn ---
-                warn "[CONSENSUS-DAEMON] 等待超时！验证者 ${next_validator_id:0:16}... 未能按时提议区块。 / Wait timed out! Validator ${next_validator_id:0:16}... failed to propose a block in time."
-                
-                # 获取锁以安全地修改数据库
-                # Acquire lock to safely modify the database
-                acquire_lock "network"
-                _slashing_handle_missed_block "$next_validator_id" "$((latest_height + 1))"
-                release_lock "network"
             fi
         fi
     done
@@ -24199,7 +24207,11 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
     def get_peer_pubkey(self, peer_id):
         if not CRYPTOGRAPHY_AVAILABLE: return None
         pubkey_tuple = db_query_ro(BLOCKCHAIN_DB_PATH, "SELECT public_key FROM validators WHERE public_key_hash = ?", (peer_id,), fetch_one=True)
-        if pubkey_tuple: return pubkey_tuple[0]
+        if pubkey_tuple and pubkey_tuple[0]: return pubkey_tuple[0]
+        miner_tuple = db_query_ro(BLOCKCHAIN_DB_PATH, "SELECT json_extract(w.proof, '$.miner_public_key') FROM blocks b JOIN block_work w ON b.hash = w.hash WHERE b.validator = ? LIMIT 1", (peer_id,), fetch_one=True)
+        if miner_tuple and miner_tuple[0]: return miner_tuple[0]
+        id_tuple = db_query_ro(BLOCKCHAIN_DB_PATH, "SELECT public_key FROM onchain_identities WHERE agent_id = ?", (peer_id,), fetch_one=True)
+        if id_tuple and id_tuple[0]: return id_tuple[0]
         pubkey_bytes = self._p2p_get_py(peer_id)
         return pubkey_bytes.decode('utf-8') if pubkey_bytes else None
 
@@ -27324,8 +27336,12 @@ blockchain_mine_block() (
     work_mode=$(_corium_work_consensus mode "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$activation_height" | jq -er .mode) || return 1
     local pending_txs
     pending_txs=$(db_query_static "$BLOCKCHAIN_DB" "SELECT hash FROM transactions WHERE block_height IS NULL ORDER BY timestamp, hash;") || return 1
-    if [ -z "$pending_txs" ] && [ "$work_mode" != pow-v2 ]; then
-        debug "没有待处理的交易需要打包。 (No pending transactions to mine.)"
+    local allow_empty=false
+    if [ "${CORIUM_ALLOW_EMPTY_BLOCKS:-0}" = "1" ] || [ -f "$CORIUM_ROOT/allow_empty_blocks" ] || [ "$work_mode" = pow-v2 ]; then
+        allow_empty=true
+    fi
+    if [ -z "$pending_txs" ] && [ "$allow_empty" != "true" ]; then
+        info "交易池无待处理交易，跳过空区块创建。 (No pending transactions to mine; skipping empty block creation.)"
         return 0
     fi
     
@@ -28100,6 +28116,12 @@ _blockchain_get_validator_pubkey() {
     [ $# -eq 1 ] && [[ "$1" =~ ^[a-f0-9]{64}$ ]] || return 1
     local validator_id="$1" pubkey pubkey_cache_dir="${VAR_CACHE_CORIUM_DIR}/validator_pubkeys" staged
     pubkey=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT public_key FROM validators WHERE public_key_hash=%s;" "$validator_id") || return 1
+    if [ -z "$pubkey" ]; then
+        pubkey=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT json_extract(w.proof, '$.miner_public_key') FROM blocks b JOIN block_work w ON b.hash = w.hash WHERE b.validator=%s LIMIT 1;" "$validator_id" 2>/dev/null || true)
+    fi
+    if [ -z "$pubkey" ]; then
+        pubkey=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT public_key FROM onchain_identities WHERE agent_id=%s LIMIT 1;" "$validator_id" 2>/dev/null || true)
+    fi
     [ -n "$pubkey" ] && [ "$(_internal_hash_text "$pubkey")" = "$validator_id" ] || return 1
     mkdir -p "$pubkey_cache_dir" || return 1
     staged=$(mktemp "$pubkey_cache_dir/key.XXXXXX") || return 1
