@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import re
 import sys
 from typing import Dict, Any
 
@@ -33,8 +34,20 @@ def get_sovereign_status(corium_root: str, network_id: str = 'ziokt-main') -> Di
         'network_id': network_id,
         'corium_root': corium_root,
         'chain_db': chain_db,
-        'online': True
+        'online': None  # A readable DB does not prove a running network service.
     }
+    hold_path=Path(corium_root).resolve().parent/'config/consensus-safety-hold.json'
+    hold=None
+    if hold_path.is_file():
+        try:
+            value=json.loads(hold_path.read_text())
+            if type(value) is not dict or value.get('schema')!='ziokt.consensus-safety-hold.v1' or type(value.get('active')) is not bool:
+                raise ValueError('Malformed safety hold')
+            hold={key:value[key] for key in ('active','reason_code','first_unverified_height') if key in value}
+        except (OSError,ValueError,TypeError):
+            hold={'active':True,'reason_code':'INVALID_HOLD_EVIDENCE'}
+    status['consensus_safety_hold']=hold
+    status['full_history_verified']=False
 
     if not os.path.exists(chain_db):
         status['error'] = f'Blockchain database not found at {chain_db}'
@@ -86,26 +99,27 @@ def get_sovereign_status(corium_root: str, network_id: str = 'ziokt-main') -> Di
     env_mining = os.environ.get('CORIUM_MINING_ENABLED', '1')
     env_allow_empty = os.environ.get('CORIUM_ALLOW_EMPTY_BLOCKS', '0')
 
-    is_mining_enabled = (env_mining != '0') and (not os.path.exists(pause_file))
+    is_mining_enabled = (env_mining != '0') and (not os.path.exists(pause_file)) and not (hold and hold.get('active'))
     is_empty_blocks_allowed = (env_allow_empty == '1') or (os.path.exists(allow_empty_file))
 
     # Formal Verification Coverage
     formal_coverage = {
         'engine': 'Lean 4 (version 4.19.0)',
         'modules': ['Consensus', 'StateMachine', 'Governance', 'OpenCI', 'Privacy', 'ContentFabric', 'Models', 'Implementation', 'Refinements'],
-        'theorems_verified': 76,
-        'axioms_audit': 'PASSED (only standard propext, Quot.sound, Classical.choice)',
-        'differential_testing': 'PASSED (bit-for-bit equivalence)'
+        'theorems_verified': None,
+        'theorem_declarations': sum(len(re.findall(r'^theorem\s+\w+',file.read_text(),re.M)) for file in Path(__file__).with_name('formal').glob('*.lean')) or None,
+        'axioms_audit': 'not observed by this status query; consult the exact source CI receipt',
+        'differential_testing': 'Python comparisons against transcribed formulas; not a production refinement proof'
     }
 
     # Distinct Node Roles
     roles = {
-        'corium_pow_miner': 'Active' if is_mining_enabled else 'Disabled (Listening Only)',
-        'openci_compute_worker': 'Active (Attested Bounties v1)',
-        'p2p_relayer': 'Active (Shadow6/DHT Mesh)',
-        'ziokt_effort_node': 'Active',
+        'corium_pow_miner': 'Configured; runtime not observed' if is_mining_enabled else 'Disabled or safety-held',
+        'openci_compute_worker': 'Runtime not observed',
+        'p2p_relayer': 'Runtime and remote peers not observed',
+        'ziokt_effort_node': 'Runtime not observed',
         'pos_governance_validator': f'Registered (Stake: {node_stake})' if node_stake > 0 else 'Unstaked (Stake: 0, Sovereign Citizen)',
-        'full_verification_node': 'Active (Independent Verification Kernel)'
+        'full_verification_node': 'Blocked by history provenance' if hold and hold.get('active') else 'Full history verification not established'
     }
 
     status.update({
@@ -160,7 +174,7 @@ def print_pretty_status(status: Dict[str, Any]):
     print("FORMAL VERIFICATION & LEAN 4 ASSURANCE:")
     print(f"  * Verifier:                {fv.get('engine')}")
     print(f"  * Modules Checked:         {', '.join(fv.get('modules', []))}")
-    print(f"  * Theorems Verified:       {fv.get('theorems_verified')} (0 sorry, 0 admit)")
+    print(f"  * Theorem declarations:    {fv.get('theorem_declarations')} (runtime proof checking not observed)")
     print(f"  * Axioms Audit:            {fv.get('axioms_audit')}")
     print(f"  * Differential Alignment:  {fv.get('differential_testing')}")
     print("================================================================================")
