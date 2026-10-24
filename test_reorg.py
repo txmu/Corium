@@ -17,6 +17,7 @@ class ReorgTests(Fixture):
         # consensus blocks may still be signed by the shared genesis validator.
         peer_key=ec.generate_private_key(ec.SECP256K1())
         peer_public=peer_key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode().rstrip('\n')
+        self.peer_key=peer_key;self.peer_public=peer_public
         self.peer_identity=hashlib.sha256(peer_public.encode()).hexdigest()
         peer_public_file=self.root/'peer/identity.key.pub';peer_public_file.write_text(peer_public+'\n')
         os.environ['SCRIPT_PATH']=str(SOURCE)
@@ -171,13 +172,14 @@ class ReorgTests(Fixture):
         namespace.update(SCRIPT_PATH=str(SOURCE),BLOCKCHAIN_DB_PATH=str(self.chain),FORUM_DB_PATH=str(self.forum),DHT_DB_PATH=str(self.dht),USER_PUBLIC_KEY_FILE=str(self.etc/'identity.key.pub'),OUR_NODE_ID_CACHE=None)
         receiver=namespace['CoriumGatewayHandler'].__new__(namespace['CoriumGatewayHandler'])
         tip=self.branch(self.remote,2,30)
-        payload='|'.join([tip,'2','127.0.0.1',str(self.port),self.identity,self.sign(tip+'|2')])
+        def peer_sign(value):return self.peer_key.sign(value.encode(),ec.ECDSA(hashes.SHA256())).hex()
+        payload='|'.join([tip,'2','127.0.0.1',str(self.port),self.peer_identity,peer_sign(tip+'|2')])
         def announce(body):
-            return receiver.handle_dht_message({'type':'ANNOUNCE_BLOCK','payload':body,'sender_id':self.identity,'signature':self.sign('ANNOUNCE_BLOCK|'+body)})
+            return receiver.handle_dht_message({'type':'ANNOUNCE_BLOCK','payload':body,'sender_id':self.peer_identity,'public_key':self.peer_public,'signature':peer_sign('ANNOUNCE_BLOCK|'+body)})
         self.assertEqual(announce(payload),{'status':'success','data':'BLOCK_ACCEPTED'})
         self.assertEqual(self.tip(self.chain),tip);self.assert_replay();before=self.semantic()
         self.assertEqual(announce(payload),{'status':'success','data':'BLOCK_KNOWN'})
-        for body in (payload.rsplit('|',1)[0]+'|00',payload+'|extra',payload.replace('|2|','|3|'),payload.replace(self.identity,'0'*64)):
+        for body in (payload.rsplit('|',1)[0]+'|00',payload+'|extra',payload.replace('|2|','|3|'),payload.replace(self.peer_identity,'0'*64)):
             self.assertEqual(announce(body)['status'],'error');self.assertEqual(self.semantic(),before)
 
     def test_interrupted_reorg_term_rolls_back_and_restart(self):
