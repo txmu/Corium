@@ -26164,7 +26164,7 @@ dht_bootstrap() {
                 continue
             fi
             for ip in $dns_ips; do
-                resolved_nodes+=("tcp:${ip}:${node_port}")
+                if [[ "$ip" == *:* ]]; then resolved_nodes+=("ipv6:[${ip}]:${node_port}"); else resolved_nodes+=("ipv4:${ip}:${node_port}"); fi
             done
         else
             resolved_nodes+=("${node_type}:${node_addr}:${node_port}")
@@ -33341,6 +33341,39 @@ load_config() {
     P2P_I2P_DESTINATION="${CORIUM_CONFIG_CACHE[p2p_i2p_destination]:-}"
     if [[ -n "${CORIUM_TEST_P2P_PORT:-}" ]]; then P2P_PORT="$CORIUM_TEST_P2P_PORT"; fi
     if [[ -n "${CORIUM_TEST_GATEWAY_PORT:-}" ]]; then CORIUM_GATEWAY_PORT="$CORIUM_TEST_GATEWAY_PORT"; fi
+    # Convert explicit host:port seeds into the native typed address format.
+    # Neither option has implicit peers; reject malformed endpoints before networking.
+    DHT_BOOTSTRAP_NODES_STRING=$("${PYTHON_CMD:-python3}" - "${CORIUM_CONFIG_CACHE[p2p_seed_peers]:-}" "${CORIUM_CONFIG_CACHE[p2p_dht_bootstrap_nodes]:-}" <<'PY_CORIUM_SEEDS'
+import ipaddress,re,sys
+from urllib.parse import urlsplit
+seeds,legacy=sys.argv[1:]
+if seeds and legacy:raise SystemExit('Configure seed_peers or dht_bootstrap_nodes, not both')
+items=[]
+for raw in seeds.split(',') if seeds else []:
+ raw=raw.strip();value=urlsplit('//'+raw)
+ try:port=value.port
+ except ValueError:raise SystemExit('Invalid seed port')
+ if not value.hostname or not port or value.path or value.query or value.fragment or value.username or value.password or any(c.isspace() for c in raw):raise SystemExit('Invalid seed endpoint')
+ host=value.hostname
+ try:kind='ipv'+str(ipaddress.ip_address(host).version)
+ except ValueError:
+  if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?',host):raise SystemExit('Invalid seed hostname')
+  kind='dns'
+ if ':' in host:host='['+host+']'
+ items.append(kind+':'+host+':'+str(port))
+if legacy:
+ for raw in legacy.split(','):
+  raw=raw.strip();kind,sep,address=raw.partition(':')
+  if kind not in {'ipv4','ipv6','dns','tor','i2p','tcp'} or not sep or any(c.isspace() for c in raw):raise SystemExit('Invalid native bootstrap address')
+  value=urlsplit('//'+address)
+  try:port=value.port
+  except ValueError:raise SystemExit('Invalid native bootstrap port')
+  if not value.hostname or not port or value.path or value.query or value.fragment or value.username or value.password:raise SystemExit('Invalid native bootstrap endpoint')
+  items.append(raw)
+if len(items)>32:raise SystemExit('Too many explicit seed peers')
+print(','.join(items))
+PY_CORIUM_SEEDS
+    ) || return 1
     P2P_PUBLIC_IP_OVERRIDE="${CORIUM_CONFIG_CACHE[p2p_public_ip]:-}" # 新增：赋给全局变量
     TLS_ECH_ENABLED="${CORIUM_CONFIG_CACHE[p2p_tls_ech_enabled]:-}"
     TLS_NO_SNI_CLIENT="${CORIUM_CONFIG_CACHE[p2p_tls_no_sni_client]:-}"
@@ -33586,13 +33619,14 @@ corix_init() {
     check_permissions "init"
     
     # --- [V97 新增] 参数解析 / [V97 NEW] Argument Parsing ---
-    local interactive_mode=0
-    if [ $# -gt 1 ] || { [ $# -eq 1 ] && [ "$1" != "--interactive" ]; }; then
-        error "init 参数无效。/ Invalid init arguments."
-    fi
-    if [ "${1:-}" = "--interactive" ]; then
-        interactive_mode=1
-    fi
+    local interactive_mode=0 state_only=0 init_option
+    for init_option in "$@"; do
+        case "$init_option" in
+            --interactive) interactive_mode=1 ;;
+            --state-only) state_only=1 ;;
+            *) error "init 参数无效。/ Invalid init arguments." ;;
+        esac
+    done
     # -------------------------------------------
     
     local encrypt_flag=""
@@ -33786,7 +33820,7 @@ corix_init() {
     # Deterministic local integration tests need the durable node state without
     # inheriting long-lived consensus/P2P processes. Production keeps the
     # historical daemon startup path unless this explicit test-only switch is set.
-    if [[ "${CORIUM_TEST_NO_DAEMONS:-0}" == "1" ]]; then
+    if [[ "$state_only" == "1" || "${CORIUM_TEST_NO_DAEMONS:-0}" == "1" ]]; then
         info "测试模式：已完成状态初始化，跳过常驻 daemon 启动。 / Test mode: state initialized; persistent daemons skipped."
         release_lock "system"
         return 0

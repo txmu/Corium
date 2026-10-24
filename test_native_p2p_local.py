@@ -101,3 +101,16 @@ class NativeLocalP2PTests(unittest.TestCase):
 
 if __name__=='__main__':
     unittest.main()
+
+
+class ExplicitSeedConfigurationTests(unittest.TestCase):
+    def test_host_ipv4_ipv6_and_empty_seeds_reach_native_loader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);config=root/'etc/corix/networks/default/corix.conf';config.parent.mkdir(parents=True)
+            for seeds,expected in [('', ''),('192.0.2.1:7234','ipv4:192.0.2.1:7234'),('[2001:db8::1]:7234','ipv6:[2001:db8::1]:7234'),('seed.example:7234','dns:seed.example:7234')]:
+                config.write_text('[p2p]\nseed_peers='+seeds+'\n');config.chmod(0o600)
+                result=subprocess.run(['bash','-c','source "$1"\nload_config || exit 2\nprintf "%s" "$DHT_BOOTSTRAP_NODES_STRING"','seed-test',str(SOURCE)],env=dict(os.environ,CORIUM_ROOT=str(root)),capture_output=True,text=True,timeout=15)
+                self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(result.stdout,expected)
+            config.write_text('[p2p]\nseed_peers=bad/path:7234\n');config.chmod(0o600)
+            result=subprocess.run(['bash','-c','source "$1"\nload_config','seed-test',str(SOURCE)],env=dict(os.environ,CORIUM_ROOT=str(root)),capture_output=True,text=True,timeout=15)
+            self.assertNotEqual(result.returncode,0)
