@@ -62,6 +62,7 @@ done
 
 echo "=== [3/4] Running Python comparisons against transcribed model formulas ==="
 python3 formal/test_lean_differential.py
+python3 formal/test_dna_correspondence.py
 
 echo "=== [4/4] Verifying Source Correspondence ==="
 python3 formal/check_source.py

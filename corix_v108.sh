@@ -2306,7 +2306,12 @@ def asset_token_id(network, block_hash):
 
 
 def asset_transaction_bytes(tx):
-    # Match Corium's existing signed serialization exactly.
+    # Recovery networks bind native wallet signatures to chain namespace and actor.
+    network=tx['data'].get('network_id')
+    if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:
+        return encoded({'schema':'corium.chain-transaction.v3','network':network,'public_key':tx['public_key'],
+                        'type':tx['type'],'data':tx['data'],'timestamp':tx['timestamp']})
+    # Match Corium's historical signed serialization exactly.
     return ('{"type":'+json.dumps(tx['type'])+',"data":'+encoded(tx['data']).decode()+',"timestamp":'+str(tx['timestamp'])+'}').encode()
 
 
@@ -2517,6 +2522,7 @@ def asset_validate(db, network, tx_type, payload, sender):
     if tx_type in {'zkn_transfer','zkn_private_transfer'}:
         fields = {'token_id','recipient','nonce'}
         if tx_type == 'zkn_private_transfer': fields |= {'network_id','receipt'}
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}: fields.add('network_id')
         if not isinstance(payload,dict) or set(payload)!=fields:
             fail('INVALID_ZKN','exact native NFT transfer required')
         if tx_type == 'zkn_private_transfer':
@@ -2684,6 +2690,7 @@ def asset_preflight(root,network,params,config):
     if action=='zkn.transfer':
         if not resource.startswith('zkn:') or set(arguments)!={'recipient','nonce'}: fail('INVALID_PARAMS','fixed NFT gift arguments required')
         payload={'token_id':resource[4:],**arguments};sender=corium_identity(root,network)
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:payload['network_id']=network
         with closing(corium_db(root,network,'blockchain/chain.db')) as db: asset_validate(db,network,'zkn_transfer',payload,sender)
         return {'transaction_type':'zkn_transfer','payload':payload,'issuer':sender}
     fail('INVALID_PARAMS','known native asset operation required')
@@ -5866,7 +5873,12 @@ def asset_token_id(network, block_hash):
 
 
 def asset_transaction_bytes(tx):
-    # Match Corium's existing signed serialization exactly.
+    # Recovery networks bind native wallet signatures to chain namespace and actor.
+    network=tx['data'].get('network_id')
+    if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:
+        return encoded({'schema':'corium.chain-transaction.v3','network':network,'public_key':tx['public_key'],
+                        'type':tx['type'],'data':tx['data'],'timestamp':tx['timestamp']})
+    # Match Corium's historical signed serialization exactly.
     return ('{"type":'+json.dumps(tx['type'])+',"data":'+encoded(tx['data']).decode()+',"timestamp":'+str(tx['timestamp'])+'}').encode()
 
 
@@ -6077,6 +6089,7 @@ def asset_validate(db, network, tx_type, payload, sender):
     if tx_type in {'zkn_transfer','zkn_private_transfer'}:
         fields = {'token_id','recipient','nonce'}
         if tx_type == 'zkn_private_transfer': fields |= {'network_id','receipt'}
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}: fields.add('network_id')
         if not isinstance(payload,dict) or set(payload)!=fields:
             fail('INVALID_ZKN','exact native NFT transfer required')
         if tx_type == 'zkn_private_transfer':
@@ -6244,6 +6257,7 @@ def asset_preflight(root,network,params,config):
     if action=='zkn.transfer':
         if not resource.startswith('zkn:') or set(arguments)!={'recipient','nonce'}: fail('INVALID_PARAMS','fixed NFT gift arguments required')
         payload={'token_id':resource[4:],**arguments};sender=corium_identity(root,network)
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:payload['network_id']=network
         with closing(corium_db(root,network,'blockchain/chain.db')) as db: asset_validate(db,network,'zkn_transfer',payload,sender)
         return {'transaction_type':'zkn_transfer','payload':payload,'issuer':sender}
     fail('INVALID_PARAMS','known native asset operation required')
@@ -9434,7 +9448,12 @@ def asset_token_id(network, block_hash):
 
 
 def asset_transaction_bytes(tx):
-    # Match Corium's existing signed serialization exactly.
+    # Recovery networks bind native wallet signatures to chain namespace and actor.
+    network=tx['data'].get('network_id')
+    if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:
+        return encoded({'schema':'corium.chain-transaction.v3','network':network,'public_key':tx['public_key'],
+                        'type':tx['type'],'data':tx['data'],'timestamp':tx['timestamp']})
+    # Match Corium's historical signed serialization exactly.
     return ('{"type":'+json.dumps(tx['type'])+',"data":'+encoded(tx['data']).decode()+',"timestamp":'+str(tx['timestamp'])+'}').encode()
 
 
@@ -9645,6 +9664,7 @@ def asset_validate(db, network, tx_type, payload, sender):
     if tx_type in {'zkn_transfer','zkn_private_transfer'}:
         fields = {'token_id','recipient','nonce'}
         if tx_type == 'zkn_private_transfer': fields |= {'network_id','receipt'}
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}: fields.add('network_id')
         if not isinstance(payload,dict) or set(payload)!=fields:
             fail('INVALID_ZKN','exact native NFT transfer required')
         if tx_type == 'zkn_private_transfer':
@@ -9812,6 +9832,7 @@ def asset_preflight(root,network,params,config):
     if action=='zkn.transfer':
         if not resource.startswith('zkn:') or set(arguments)!={'recipient','nonce'}: fail('INVALID_PARAMS','fixed NFT gift arguments required')
         payload={'token_id':resource[4:],**arguments};sender=corium_identity(root,network)
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:payload['network_id']=network
         with closing(corium_db(root,network,'blockchain/chain.db')) as db: asset_validate(db,network,'zkn_transfer',payload,sender)
         return {'transaction_type':'zkn_transfer','payload':payload,'issuer':sender}
     fail('INVALID_PARAMS','known native asset operation required')
@@ -12646,7 +12667,12 @@ def asset_token_id(network, block_hash):
 
 
 def asset_transaction_bytes(tx):
-    # Match Corium's existing signed serialization exactly.
+    # Recovery networks bind native wallet signatures to chain namespace and actor.
+    network=tx['data'].get('network_id')
+    if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:
+        return encoded({'schema':'corium.chain-transaction.v3','network':network,'public_key':tx['public_key'],
+                        'type':tx['type'],'data':tx['data'],'timestamp':tx['timestamp']})
+    # Match Corium's historical signed serialization exactly.
     return ('{"type":'+json.dumps(tx['type'])+',"data":'+encoded(tx['data']).decode()+',"timestamp":'+str(tx['timestamp'])+'}').encode()
 
 
@@ -12857,6 +12883,7 @@ def asset_validate(db, network, tx_type, payload, sender):
     if tx_type in {'zkn_transfer','zkn_private_transfer'}:
         fields = {'token_id','recipient','nonce'}
         if tx_type == 'zkn_private_transfer': fields |= {'network_id','receipt'}
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}: fields.add('network_id')
         if not isinstance(payload,dict) or set(payload)!=fields:
             fail('INVALID_ZKN','exact native NFT transfer required')
         if tx_type == 'zkn_private_transfer':
@@ -13024,6 +13051,7 @@ def asset_preflight(root,network,params,config):
     if action=='zkn.transfer':
         if not resource.startswith('zkn:') or set(arguments)!={'recipient','nonce'}: fail('INVALID_PARAMS','fixed NFT gift arguments required')
         payload={'token_id':resource[4:],**arguments};sender=corium_identity(root,network)
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:payload['network_id']=network
         with closing(corium_db(root,network,'blockchain/chain.db')) as db: asset_validate(db,network,'zkn_transfer',payload,sender)
         return {'transaction_type':'zkn_transfer','payload':payload,'issuer':sender}
     fail('INVALID_PARAMS','known native asset operation required')
@@ -15799,7 +15827,12 @@ def asset_token_id(network, block_hash):
 
 
 def asset_transaction_bytes(tx):
-    # Match Corium's existing signed serialization exactly.
+    # Recovery networks bind native wallet signatures to chain namespace and actor.
+    network=tx['data'].get('network_id')
+    if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:
+        return encoded({'schema':'corium.chain-transaction.v3','network':network,'public_key':tx['public_key'],
+                        'type':tx['type'],'data':tx['data'],'timestamp':tx['timestamp']})
+    # Match Corium's historical signed serialization exactly.
     return ('{"type":'+json.dumps(tx['type'])+',"data":'+encoded(tx['data']).decode()+',"timestamp":'+str(tx['timestamp'])+'}').encode()
 
 
@@ -16010,6 +16043,7 @@ def asset_validate(db, network, tx_type, payload, sender):
     if tx_type in {'zkn_transfer','zkn_private_transfer'}:
         fields = {'token_id','recipient','nonce'}
         if tx_type == 'zkn_private_transfer': fields |= {'network_id','receipt'}
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}: fields.add('network_id')
         if not isinstance(payload,dict) or set(payload)!=fields:
             fail('INVALID_ZKN','exact native NFT transfer required')
         if tx_type == 'zkn_private_transfer':
@@ -16177,6 +16211,7 @@ def asset_preflight(root,network,params,config):
     if action=='zkn.transfer':
         if not resource.startswith('zkn:') or set(arguments)!={'recipient','nonce'}: fail('INVALID_PARAMS','fixed NFT gift arguments required')
         payload={'token_id':resource[4:],**arguments};sender=corium_identity(root,network)
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:payload['network_id']=network
         with closing(corium_db(root,network,'blockchain/chain.db')) as db: asset_validate(db,network,'zkn_transfer',payload,sender)
         return {'transaction_type':'zkn_transfer','payload':payload,'issuer':sender}
     fail('INVALID_PARAMS','known native asset operation required')
@@ -18952,7 +18987,12 @@ def asset_token_id(network, block_hash):
 
 
 def asset_transaction_bytes(tx):
-    # Match Corium's existing signed serialization exactly.
+    # Recovery networks bind native wallet signatures to chain namespace and actor.
+    network=tx['data'].get('network_id')
+    if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:
+        return encoded({'schema':'corium.chain-transaction.v3','network':network,'public_key':tx['public_key'],
+                        'type':tx['type'],'data':tx['data'],'timestamp':tx['timestamp']})
+    # Match Corium's historical signed serialization exactly.
     return ('{"type":'+json.dumps(tx['type'])+',"data":'+encoded(tx['data']).decode()+',"timestamp":'+str(tx['timestamp'])+'}').encode()
 
 
@@ -19163,6 +19203,7 @@ def asset_validate(db, network, tx_type, payload, sender):
     if tx_type in {'zkn_transfer','zkn_private_transfer'}:
         fields = {'token_id','recipient','nonce'}
         if tx_type == 'zkn_private_transfer': fields |= {'network_id','receipt'}
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}: fields.add('network_id')
         if not isinstance(payload,dict) or set(payload)!=fields:
             fail('INVALID_ZKN','exact native NFT transfer required')
         if tx_type == 'zkn_private_transfer':
@@ -19330,6 +19371,7 @@ def asset_preflight(root,network,params,config):
     if action=='zkn.transfer':
         if not resource.startswith('zkn:') or set(arguments)!={'recipient','nonce'}: fail('INVALID_PARAMS','fixed NFT gift arguments required')
         payload={'token_id':resource[4:],**arguments};sender=corium_identity(root,network)
+        if network in {'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}:payload['network_id']=network
         with closing(corium_db(root,network,'blockchain/chain.db')) as db: asset_validate(db,network,'zkn_transfer',payload,sender)
         return {'transaction_type':'zkn_transfer','payload':payload,'issuer':sender}
     fail('INVALID_PARAMS','known native asset operation required')
@@ -26632,6 +26674,362 @@ def _native_work_primitives():
 _work_primitives=_native_work_primitives()
 validate,commitment,verify_work,work_digest,integer,encoded,MAX_WEIGHT=(_work_primitives[k] for k in ("validate","commitment","verify_work","work_digest","integer","encoded","MAX_WEIGHT"))
 
+def _load__native_dna():
+    """Bounded DNA duplex storage and authenticated RNA transmission primitives.
+
+    ACGT/ACGU are reversible encodings, not new cryptographic algorithms. Repair
+    requires an externally authenticated payload root and at least one intact strand.
+    Signatures authenticate roots and metadata; coherent replacement is rejected.
+    """
+    import hashlib
+    import json
+    import re
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    MAX_GENE_BYTES = 4096
+    ALPHABET = 'ACGT'
+    PAIR = str.maketrans('ACGT', 'TGCA')
+
+
+    def require(value, message):
+        if not value:
+            raise ValueError(message)
+
+
+    def integer(value, low=0, high=2**63-1):
+        require(type(value) is int and low <= value <= high, 'integer bounds')
+        return value
+
+
+    def encoded(value):
+        return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False).encode()
+
+
+    def loads(raw, limit=65536):
+        require(type(raw) is str and len(raw.encode()) <= limit, 'JSON byte budget')
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                require(key not in result, 'duplicate field')
+                result[key] = value
+            return result
+        def forbidden(_):
+            raise ValueError('only integer JSON numbers are supported')
+        try:
+            result = json.loads(raw, object_pairs_hook=unique, parse_float=forbidden, parse_constant=forbidden)
+        except (RecursionError, OverflowError) as error:
+            raise ValueError('JSON nesting budget') from error
+        def portable(value, depth=0):
+            require(depth <= 24, 'JSON nesting budget')
+            if isinstance(value, (dict, list)):
+                for child in value.values() if isinstance(value, dict) else value:
+                    portable(child, depth+1)
+            elif type(value) is int:
+                integer(value, -(2**63)+1)
+        portable(result)
+        return result
+
+
+    def digest(raw):
+        return hashlib.sha256(b'Corium/DNA/payload/v1\0'+raw).hexdigest()
+
+
+    def encode_bases(raw):
+        require(type(raw) is bytes and len(raw) <= MAX_GENE_BYTES, 'gene byte budget')
+        return ''.join(ALPHABET[(value >> shift) & 3] for value in raw for shift in (6, 4, 2, 0))
+
+
+    def decode_bases(bases):
+        require(type(bases) is str and len(bases) <= MAX_GENE_BYTES*4 and len(bases) % 4 == 0
+                and re.fullmatch('[ACGT]*', bases) is not None, 'canonical DNA bases')
+        return bytes(sum(ALPHABET.index(bases[offset+i]) << (6-2*i) for i in range(4))
+                     for offset in range(0, len(bases), 4))
+
+
+    def complement(bases):
+        require(type(bases) is str and len(bases) <= MAX_GENE_BYTES*4
+                and re.fullmatch('[ACGT]*', bases) is not None, 'bounded DNA strand')
+        return bases.translate(PAIR)[::-1]
+
+
+    def duplex(raw):
+        sense = encode_bases(raw)
+        return {'schema':'corium.dna.duplex.v1', 'bytes':len(raw), 'root':digest(raw),
+                'sense':sense, 'antisense':complement(sense)}
+
+
+    def restore(gene, authenticated_root, repair=False):
+        require(type(gene) is dict and set(gene) == {'schema','bytes','root','sense','antisense'}
+                and gene['schema'] == 'corium.dna.duplex.v1', 'exact duplex schema')
+        require(type(authenticated_root) is str and re.fullmatch('[a-f0-9]{64}', authenticated_root)
+                and gene['root'] == authenticated_root, 'externally authenticated root required')
+        integer(gene['bytes'], 0, MAX_GENE_BYTES)
+        # A damaged strand may have invalid bases; only the authenticated intact
+        # strand is eligible for repair. Never combine two unauthenticated guesses.
+        candidates = []
+        for name in ('sense','antisense'):
+            try:
+                bases = gene[name] if name == 'sense' else complement(gene[name])
+                data = decode_bases(bases)
+                require(len(data) == gene['bytes'] and digest(data) == authenticated_root, 'strand root mismatch')
+                candidates.append(data)
+            except ValueError:
+                if not repair:
+                    raise
+        require(candidates and (repair or len(candidates) == 2), 'no authenticated intact strand')
+        require(all(data == candidates[0] for data in candidates), 'ambiguous duplex')
+        if not repair:
+            require(gene['antisense'] == complement(gene['sense']), 'duplex complement mismatch')
+        return candidates[0]
+
+
+    def public_key(key):
+        return key.public_key().public_bytes(serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo).decode().rstrip('\n')
+
+
+    def rna_sign(key, chain, policy, sender, sequence, issued_at, payload):
+        require(isinstance(key, ec.EllipticCurvePrivateKey) and isinstance(key.curve, ec.SECP256K1), 'native key')
+        require(type(payload) is bytes and len(payload) <= MAX_GENE_BYTES, 'RNA payload budget')
+        for name in (chain, policy, sender):
+            require(type(name) is str and re.fullmatch('[a-f0-9]{64}', name), 'RNA domain digest')
+        integer(sequence, 1); integer(issued_at, 0, 2**63-121)
+        header = {'schema':'corium.rna.v1','chain':chain,'policy':policy,'sender':sender,
+                  'sequence':sequence,'issued_at':issued_at,'expires_at':issued_at+120,
+                  'bytes':len(payload),'root':digest(payload)}
+        signature = key.sign(b'Corium/RNA/message/v1\0'+encoded(header),ec.ECDSA(hashes.SHA256())).hex()
+        return {'header':header,'rna':encode_bases(payload).replace('T','U'),'signature':signature}
+
+
+    def rna_open(frame, pem, chain, policy, sender, previous_sequence, now):
+        require(type(frame) is dict and set(frame) == {'header','rna','signature'}, 'exact RNA frame')
+        h = frame['header']
+        require(type(h) is dict and set(h) == {'schema','chain','policy','sender','sequence','issued_at','expires_at','bytes','root'}
+                and h['schema'] == 'corium.rna.v1', 'exact RNA header')
+        require(h['chain'] == chain and h['policy'] == policy and h['sender'] == sender, 'RNA domain mismatch')
+        integer(previous_sequence); integer(now); integer(h['sequence'],1); integer(h['issued_at']); integer(h['expires_at'])
+        require(previous_sequence < h['sequence'] and h['issued_at'] <= now <= h['expires_at']
+                and h['expires_at']-h['issued_at'] == 120, 'RNA replay or validity window')
+        integer(h['bytes'],0,MAX_GENE_BYTES)
+        require(type(frame['rna']) is str and re.fullmatch('[ACGU]*',frame['rna']) is not None
+                and len(frame['rna']) == h['bytes']*4, 'canonical RNA bases')
+        data = decode_bases(frame['rna'].replace('U','T'))
+        require(digest(data) == h['root'], 'RNA payload commitment')
+        require(type(frame['signature']) is str and re.fullmatch('[a-f0-9]{16,144}',frame['signature']), 'RNA signature format')
+        key = serialization.load_pem_public_key(pem.encode())
+        require(isinstance(key, ec.EllipticCurvePublicKey) and isinstance(key.curve,ec.SECP256K1), 'native RNA key')
+        require(hashlib.sha256(pem.encode()).hexdigest() == sender, 'RNA sender identity')
+        key.verify(bytes.fromhex(frame['signature']),b'Corium/RNA/message/v1\0'+encoded(h),ec.ECDSA(hashes.SHA256()))
+        return data
+
+    return locals()
+_native_dna=__import__("types").SimpleNamespace(**_load__native_dna())
+def _load__native_cooperative():
+    """Pure cooperative registry transitions, independent of mining eligibility.
+
+    Membership is a public-key identity, not proof of a distinct human or operator.
+    These rules reject on-chain control transfer and capital-weighted governance;
+    they cannot prevent private-key sales, collusion, or a software hard fork.
+    No claim is made that metadata here locks external/native financial assets.
+    """
+    import hashlib
+    import copy
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    encoded,require,integer,public_key=_native_dna.encoded,_native_dna.require,_native_dna.integer,_native_dna.public_key
+
+    CHARTER = {'schema':'corium.cooperative-charter.v1','vote_rule':'one-member-one-vote',
+               'membership_transfer':False,'control_transfer':False,'mergers':False,
+               'federation_exit':'unilateral-by-each-cooperative','capital_voting':False}
+    FORBIDDEN = {'merge','sell_control','delegate_control','transfer_membership','capital_weighted_vote','change_charter'}
+
+
+    def identity(pem):
+        require(type(pem)is str and len(pem)<=1024,'bounded member public key')
+        key=serialization.load_pem_public_key(pem.encode())
+        require(isinstance(key,ec.EllipticCurvePublicKey) and isinstance(key.curve,ec.SECP256K1),'native member key')
+        require(key.public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode().rstrip('\n')==pem,'canonical member key')
+        return hashlib.sha256(pem.encode()).hexdigest()
+
+
+    def empty(chain):
+        require(type(chain) is str and len(chain)==64 and all(c in '0123456789abcdef'for c in chain),'chain identity')
+        return {'schema':'corium.cooperative-registry.v1','chain':chain,'cooperatives':{}}
+
+
+    def state_root(state):
+        return hashlib.sha256(b'Corium/Cooperative/state/v1\0'+encoded(state)).hexdigest()
+
+
+    def command_bytes(command):
+        return b'Corium/Cooperative/command/v1\0'+encoded(command)
+
+
+    def endorse(command,key):
+        pem=public_key(key)
+        return {'public_key':pem,'signature':key.sign(command_bytes(command),ec.ECDSA(hashes.SHA256())).hex()}
+
+
+    def endorsements(command,proofs):
+        require(type(proofs) is list and 0<len(proofs)<=512,'bounded endorsements')
+        voters={}
+        for proof in proofs:
+            require(type(proof) is dict and set(proof)=={'public_key','signature'},'endorsement fields')
+            pem=proof['public_key'];member=identity(pem)
+            require(member not in voters,'duplicate member vote')
+            require(type(proof['signature'])is str and 16<=len(proof['signature'])<=144,'bounded signature')
+            serialization.load_pem_public_key(pem.encode()).verify(bytes.fromhex(proof['signature']),command_bytes(command),ec.ECDSA(hashes.SHA256()))
+            voters[member]=pem
+        return voters
+
+
+    def quorum(members,voters):
+        # Funding/wealth fields have no place in the exact command schema or tally.
+        require(members and 3*len(set(members)&set(voters))>2*len(members),'strict member supermajority')
+
+
+    def apply(state,command,proofs):
+        require(type(command)is dict and set(command)=={'schema','chain','cooperative','sequence','previous_state','action','arguments'}
+                and command['schema']=='corium.cooperative-command.v1','exact cooperative command')
+        require(command['chain']==state['chain'] and command['previous_state']==state_root(state),'chain/state binding')
+        action=command['action'];require(action not in FORBIDDEN,'immutable anti-takeover charter')
+        require(action in {'create','admit','leave','federate','unfederate'},'unknown cooperative action')
+        integer(command['sequence'],1);args=command['arguments'];require(type(args)is dict,'arguments object')
+        cid=command['cooperative'];require(type(cid)is str and 1<=len(cid)<=64 and all(c.isascii()and(c.isalnum()or c in '-_')for c in cid),'cooperative id')
+        voters=endorsements(command,proofs);result=copy.deepcopy(state);coops=result['cooperatives']
+        require(len(coops)<=10000,'cooperative registry budget')
+        if action=='create':
+            require(cid not in coops and len(coops)<10000 and command['sequence']==1 and set(args)=={'members'},'new cooperative')
+            require(type(args['members'])is list and 1<=len(args['members'])<=256,'founding member budget')
+            members={identity(pem):pem for pem in args['members']}
+            require(len(members)==len(args['members']) and members==voters,'all founding members must consent')
+            coops[cid]={'charter':copy.deepcopy(CHARTER),'members':members,'sequence':1,'federations':[]}
+            return result
+        require(cid in coops,'known cooperative');coop=coops[cid]
+        require(coop['charter']==CHARTER and command['sequence']==coop['sequence']+1,'charter or sequence mismatch')
+        if action=='leave':
+            require(set(args)=={'member'} and args['member'] in coop['members']
+                    and set(voters)=={args['member']},'only member can exercise own exit')
+            del coop['members'][args['member']]
+        else:
+            quorum(coop['members'],voters)
+            if action=='admit':
+                require(set(args)=={'public_key'},'admission fields');new=identity(args['public_key'])
+                require(new not in coop['members'] and new in voters and len(coop['members'])<256,'new member consent/budget')
+                coop['members'][new]=args['public_key']
+            else:
+                require(set(args)=={'partner'} and type(args['partner'])is str and args['partner'] in coops
+                        and args['partner']!=cid,'independent federation partner')
+                partner=coops[args['partner']]
+                if action=='federate':
+                    require(args['partner'] not in coop['federations'],'already federated')
+                    quorum(partner['members'],voters)
+                    coop['federations'].append(args['partner']);partner['federations'].append(cid)
+                else:
+                    require(args['partner'] in coop['federations'],'existing federation')
+                    coop['federations'].remove(args['partner']);partner['federations'].remove(cid)
+                partner['sequence']+=1
+                partner['federations'].sort()
+                # Federation never combines member lists, identities or authority.
+            coop['federations'].sort()
+        coop['sequence']=command['sequence']
+        return result
+
+    return locals()
+_native_cooperative=__import__("types").SimpleNamespace(**_load__native_cooperative())
+def _load__native_recovery():
+    """Explicit signed recovery boundary. Never manufactures historical governance."""
+    import hashlib
+    import os
+    from pathlib import Path
+    import stat
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    DNA=_native_dna
+
+    SCHEMA='corium.recovery-declaration.v1'
+    MAIN='corium.recovery-work.v3'
+    SIDE='corium.dna-work.v1'
+    NETWORKS={'ziokt-main-recovery-20261024','ziokt-dna-side-20261024'}
+    FIELDS={'schema','network','protocol','checkpoint','initial_state_root','legacy_archive_root',
+            'genesis_sha256','verifier_source_sha256','work_policy','authority_public_key','signature'}
+
+
+    def unsigned(value):return {k:v for k,v in value.items() if k!='signature'}
+    def signing_bytes(value):return b'Corium/Recovery/declaration/v1\0'+DNA.encoded(unsigned(value))
+    def identity(value):return hashlib.sha256(signing_bytes(value)).hexdigest()
+
+
+    def read_public(path):
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+        try:
+            info=os.fstat(fd)
+            DNA.require(stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and not info.st_mode&0o022
+                        and info.st_size<=65536,'bounded owner-controlled public recovery document')
+            raw=os.read(fd,65537);DNA.require(len(raw)<=65536,'recovery document budget')
+            return raw
+        finally:os.close(fd)
+
+
+    def declaration(network):
+        if network not in NETWORKS:return None
+        root=os.environ.get('CORIUM_ROOT')
+        DNA.require(root,'recovery root required')
+        directory=Path(root)/'etc/corix/networks'/network
+        value=DNA.loads(read_public(directory/'recovery.json').decode())
+        DNA.require(type(value)is dict and set(value)==FIELDS and value['schema']==SCHEMA
+                    and value['network']==network,'exact recovery declaration')
+        DNA.require(value['protocol']==(MAIN if network.startswith('ziokt-main-')else SIDE),'distinct chain protocol')
+        genesis_raw=read_public(directory/'genesis.json');genesis=DNA.loads(genesis_raw.decode())
+        DNA.require(hashlib.sha256(genesis_raw).hexdigest()==value['genesis_sha256'],'complete genesis configuration binding')
+        for name in ('initial_state_root','legacy_archive_root','verifier_source_sha256'):
+            DNA.require(type(value[name])is str and len(value[name])==64 and all(c in '0123456789abcdef'for c in value[name]),'recovery commitment')
+        cp=value['checkpoint'];DNA.require(type(cp)is dict and set(cp)=={'height','hash'},'recovery checkpoint fields')
+        DNA.integer(cp['height'],0);DNA.require(type(cp['hash'])is str and len(cp['hash'])==64,'checkpoint digest')
+        DNA.require(cp['height']==50 if value['protocol']==MAIN else cp['height']>=784,'operator recovery boundary')
+        pem=value['authority_public_key'];keys={v['public_key'].rstrip('\n')for v in genesis['genesis_validators']}
+        DNA.require(pem in keys,'recovery authority must be supplied genesis authority')
+        key=serialization.load_pem_public_key(pem.encode())
+        DNA.require(isinstance(key,ec.EllipticCurvePublicKey) and isinstance(key.curve,ec.SECP256K1),'native recovery authority')
+        DNA.require(type(value['signature'])is str and 16<=len(value['signature'])<=144,'recovery signature budget')
+        key.verify(bytes.fromhex(value['signature']),signing_bytes(value),ec.ECDSA(hashes.SHA256()))
+        return value
+
+
+    def active(db,network,height,source_hash,check_policy,legacy):
+        value=declaration(network)
+        if value is None or height<=value['checkpoint']['height']:return None
+        cp=value['checkpoint'];known=db.execute('SELECT hash FROM blocks WHERE height=?',(cp['height'],)).fetchone()
+        DNA.require(known is not None and known[0]==cp['hash'],'recovery checkpoint differs from accepted history')
+        DNA.require(value['verifier_source_sha256']==source_hash,'recovery verifier source commitment')
+        policy={'schema':'corium.native-work-policy.v2','previous_policy':legacy,'checkpoint':cp,'work_policy':value['work_policy']}
+        genesis=db.execute('SELECT hash FROM blocks WHERE height=0').fetchone()
+        check_policy(policy,network,genesis[0])
+        DNA.require(policy['work_policy']['activation_height']==cp['height']+1,'recovery activation is prospective')
+        return policy
+
+
+    def body(block,value):
+        return DNA.encoded({'chain':identity(value),'protocol':value['protocol'],
+             'height':block['height'],'parent':block['previous_hash'],'timestamp':block['timestamp'],
+             'miner':block['validator'],'transactions':block['transactions'],
+             'initial_state_root':value['initial_state_root'],'policy':block['work']['policy']})
+
+
+    def transaction_bytes(value,network,kind,payload,timestamp,pem,height):
+        # Prefix signatures retain their historical bytes; new signatures bind both
+        # network identity, including the actor, rather than only tx data.
+        if value is None or height<=value['checkpoint']['height']:
+            import json
+            return '{"type":'+json.dumps(kind)+',"data":'+payload+',"timestamp":'+str(timestamp)+'}'
+        return DNA.encoded({'schema':'corium.chain-transaction.v3','network':network,
+            'public_key':pem,'type':kind,'data':DNA.loads(payload),'timestamp':timestamp}).decode()
+
+    return locals()
+_native_recovery=__import__("types").SimpleNamespace(**_load__native_recovery())
+DNA,Cooperative,Recovery=_native_dna,_native_cooperative,_native_recovery
+
 """Governed native testnet PoW block bytes and cumulative work policy.
 
 Native callers must still validate transactions and commit/rebuild atomically.
@@ -26643,6 +27041,9 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+
+
+
 from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.exceptions import InvalidSignature
@@ -26652,14 +27053,15 @@ PACKAGE='consensus/work-weight:2'
 SCHEMA='corium.native-work-policy.v2'
 PROOF='corium.native-block-work.v2'
 LEGACY=hashlib.sha256(b'Corium/native-pos/v108').hexdigest()
-EMBEDDED_SOURCE_DIGEST = 'cdb74a51c5d6b419560a544115e66020a6a1fa42d4e92aaac8be134d292d56bb'
+EMBEDDED_SOURCE_DIGEST = '5282e14c07d4c9adad1ccc3a8eb2e9a8ee4ca7ad566c416b3f4890148b28309b'
 
 
 def require(test,message):
     if not test:raise ValueError(message)
 
 
-def source_digest():return EMBEDDED_SOURCE_DIGEST or hashlib.sha256(b'Corium/NativeWorkVerifier/v2\0'+Path(__file__).read_bytes()+b'\0'+Path(__file__).with_name('work_weight_policy.py').read_bytes()).hexdigest()
+def source_digest():
+    return EMBEDDED_SOURCE_DIGEST or hashlib.sha256(b'Corium/NativeWorkVerifier/v3\0'+b'\0'.join(Path(__file__).with_name(name).read_bytes() for name in ('work_consensus.py','work_weight_policy.py','dna_protocol.py','recovery_consensus.py','cooperative_protocol.py'))).hexdigest()
 def policy_hash(value):return hashlib.sha256(b'Corium/NativeConsensusPolicy/v2\0'+encoded(value)).hexdigest()
 
 def loads(raw):
@@ -26672,7 +27074,7 @@ def loads(raw):
     return json.loads(raw,object_pairs_hook=unique,parse_constant=lambda value:(_ for _ in ()).throw(ValueError('nonfinite consensus number')))
 
 
-def eligible_network(network):require(type(network) is str and (network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'}),'eligible network required')
+def eligible_network(network):require(type(network) is str and (network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'} or network in Recovery.NETWORKS),'eligible network required')
 
 def check_policy(value,network,genesis):
     eligible_network(network)
@@ -26698,11 +27100,14 @@ def proposal(db,network,payload,height):
 
 
 def active(db,network,height,validate_previous=True):
-    if not (network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'}):return None
+    if not (network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'} or network in Recovery.NETWORKS):return None
+    baseline=Recovery.active(db,network,height,source_digest(),check_policy,LEGACY)
+    recovery=Recovery.declaration(network)
     rows=db.execute("SELECT e.compute_program_hash,e.verifier_script_hash,t.data,t.block_height,t.hash,b.transactions FROM compute_engines e JOIN transactions t ON t.hash=e.engine_id LEFT JOIN blocks b ON b.height=t.block_height WHERE e.pkg_id=? AND e.is_active=1 AND t.type='propose_new_compute_engine' AND t.block_height IS NOT NULL ORDER BY t.block_height,t.hash",(PACKAGE,)).fetchall()
     genesis=db.execute('SELECT hash FROM blocks WHERE height=0').fetchone();require(genesis is not None,'native genesis required')
-    accepted=[];previous=LEGACY
+    accepted=[];previous=policy_hash(baseline) if baseline else LEGACY
     for row in rows:
+        if recovery is not None and row['block_height']<=recovery['checkpoint']['height']:continue
         try:payload=json.loads(row['data']);value=check_policy(payload.get('work_consensus'),network,genesis[0])
         except (ValueError, KeyError, TypeError):continue
         activation=value['work_policy']['activation_height']
@@ -26718,7 +27123,7 @@ def active(db,network,height,validate_previous=True):
         if validate_previous:require(value['previous_policy']==previous and (not accepted or activation>accepted[-1]['work_policy']['activation_height']),'native activation sequence')
         checkpoint=value['checkpoint'];known=db.execute('SELECT hash FROM blocks WHERE height=?',(checkpoint['height'],)).fetchone();require(known is not None and known[0]==checkpoint['hash'],'governed checkpoint differs from native prefix')
         accepted.append(value);previous=policy_hash(value)
-    return accepted[-1] if accepted else None
+    return accepted[-1] if accepted else baseline
 
 
 def parent(db,hash_value):
@@ -26735,7 +27140,9 @@ def miner_key(value):
 
 
 def signing_bytes(block):
-    return b'Corium/NativeWorkBlock/v2\0'+encoded({k:v for k,v in block.items() if k!='signature'})
+    schema=block.get('work',{}).get('schema')
+    domain=b'Corium/DNA/block/v1\0' if schema==Recovery.SIDE else b'Corium/Recovery/block/v3\0' if schema==Recovery.MAIN else b'Corium/NativeWorkBlock/v2\0'
+    return domain+encoded({k:v for k,v in block.items() if k!='signature'})
 
 
 def context(block):
@@ -26748,7 +27155,17 @@ def verify(db,network,block,expected):
     require(type(block) is dict and set(block)=={'height','previous_hash','timestamp','validator','signature','transactions','work'},'exact native work block')
     p=parent(db,block['previous_hash']);require(type(block['height']) is int and block['height']==p['height']+1,'native parent/height')
     value=active(db,network,block['height']);require(value is not None,'work consensus is not active')
-    proof=block['work'];require(type(proof) is dict and set(proof)=={'schema','activation','policy','miner_public_key','nonce'} and proof['schema']==PROOF,'versioned native work proof')
+    proof=block['work'];recovery=Recovery.declaration(network)
+    fields={'schema','activation','policy','miner_public_key','nonce'}
+    if recovery is not None:
+        fields.add('recovery')
+        if recovery['protocol']==Recovery.SIDE:fields.add('dna')
+    require(type(proof)is dict and set(proof)==fields and proof['schema']==(recovery['protocol'] if recovery else PROOF),'versioned native work proof')
+    if recovery:
+        require(proof['recovery']==Recovery.identity(recovery),'exact recovery chain binding')
+        if recovery['protocol']==Recovery.SIDE:
+            raw=Recovery.body(block,recovery)
+            require(DNA.restore(proof['dna'],DNA.digest(raw))==raw,'DNA duplex binds actual block and rules')
     require(proof['activation']==policy_hash(value) and proof['policy']==commitment(value['work_policy']),'exact governed activation')
     key=miner_key(proof['miner_public_key']);require(block['validator']==hashlib.sha256(proof['miner_public_key'].encode()).hexdigest(),'native miner identity')
     integer(block['timestamp'],p['timestamp'],2**63-1)
@@ -26767,6 +27184,10 @@ def mine(db,network,key_file,previous,timestamp,transactions,attempts=100000,sta
     require(isinstance(key,ec.EllipticCurvePrivateKey) and isinstance(key.curve,ec.SECP256K1),'native private key required')
     public=key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode().rstrip('\n')
     block={'height':p['height']+1,'previous_hash':previous,'timestamp':timestamp,'validator':hashlib.sha256(public.encode()).hexdigest(),'signature':'','transactions':transactions,'work':{'schema':PROOF,'activation':policy_hash(value),'policy':commitment(value['work_policy']),'miner_public_key':public,'nonce':0}}
+    recovery=Recovery.declaration(network)
+    if recovery:
+        block['work']['schema']=recovery['protocol'];block['work']['recovery']=Recovery.identity(recovery)
+        if recovery['protocol']==Recovery.SIDE:block['work']['dna']=DNA.duplex(Recovery.body(block,recovery))
     ctx=context(block)
     for nonce in range(start_nonce,start_nonce+attempts):
         if int(work_digest(value['work_policy'],ctx,nonce),16)>=2**(256-value['work_policy']['difficulty_bits']):continue
@@ -26794,9 +27215,24 @@ def main(args):
     action,path,network=args[:3]
     with sqlite3.connect(path) as db:
         db.row_factory=sqlite3.Row
-        if action=='proposal':result=proposal(db,network,loads(args[3]),int(args[4]))
+        if action=='transaction-bytes':
+            value=Recovery.declaration(network)
+            print(Recovery.transaction_bytes(value,network,args[3],args[4],int(args[5]),args[6],int(args[7])))
+            return
+        elif action=='cooperative-validate' or action=='cooperative-apply':
+            value=Recovery.declaration(network);require(value is not None and int(args[3])>value['checkpoint']['height'],'cooperative protocol not active')
+            payload=DNA.loads(args[4]);require(type(payload)is dict and set(payload)=={'command','endorsements'},'cooperative envelope')
+            exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cooperative_registry'").fetchone()
+            row=db.execute('SELECT state FROM cooperative_registry WHERE id=1').fetchone()if exists else None
+            state=DNA.loads(row[0])if row else Cooperative.empty(Recovery.identity(value))
+            changed=Cooperative.apply(state,payload['command'],payload['endorsements'])
+            if action=='cooperative-apply':
+                db.execute('CREATE TABLE IF NOT EXISTS cooperative_registry(id INTEGER PRIMARY KEY CHECK(id=1),state TEXT NOT NULL)')
+                db.execute('INSERT OR REPLACE INTO cooperative_registry VALUES(1,?)',(DNA.encoded(changed).decode(),))
+            result={'state_root':Cooperative.state_root(changed),'native_application':True}
+        elif action=='proposal':result=proposal(db,network,loads(args[3]),int(args[4]))
         elif action=='preactivate':
-            enabled=network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'}
+            enabled=network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'} or network in Recovery.NETWORKS
             due=db.execute("SELECT 1 FROM scheduled_state_changes WHERE enactment_height=? AND type='propose_new_compute_engine' AND json_extract(data,'$.pkg_id')=? LIMIT 1",(int(args[3]),PACKAGE)).fetchone() if enabled else None
             result={'required':bool(due)}
         elif action=='mode':
@@ -26825,6 +27261,15 @@ except (ValueError,TypeError,KeyError,InvalidSignature,sqlite3.Error):
 PY_CORIUM_WORK_CONSENSUS
 )
 # END CORIUM NATIVE WORK CONSENSUS V2
+
+_corium_transaction_bytes() {
+    case "$CORIUM_NETWORK_ID" in
+        ziokt-main-recovery-20261024|ziokt-dna-side-20261024)
+            _corium_work_consensus transaction-bytes "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$1" "$2" "$3" "$4" "$5"
+            ;;
+        *) printf '{"type":"%s","data":%s,"timestamp":%s}' "$1" "$2" "$3" ;;
+    esac
+}
 
 _validate_single_transaction() {
     local tx_hash="$1"
@@ -26869,7 +27314,8 @@ _validate_single_transaction() {
             reorg_cache["$tx_hash"]="invalid"; return 1
         fi
         
-        local data_to_verify="{\"type\":\"$tx_type\",\"data\":$tx_data,\"timestamp\":$tx_timestamp}"
+        local data_to_verify
+        data_to_verify=$(_corium_transaction_bytes "$tx_type" "$tx_data" "$tx_timestamp" "$tx_pubkey" "$block_height") || return 1
         local calculated_tx_hash
         calculated_tx_hash=$(_internal_hash_text "$data_to_verify")
 
@@ -26895,7 +27341,8 @@ _validate_single_transaction() {
     tx_pubkey=$(jq -er '.[3]' <<< "$tx_db_entry") || return 1
     tx_timestamp=$(jq -er '.[4]' <<< "$tx_db_entry") || return 1
     
-    local data_to_verify="{\"type\":\"$tx_type\",\"data\":$tx_payload,\"timestamp\":$tx_timestamp}"
+    local data_to_verify
+    data_to_verify=$(_corium_transaction_bytes "$tx_type" "$tx_payload" "$tx_timestamp" "$tx_pubkey" "$block_height") || return 1
     
     [[ "$tx_timestamp" =~ ^[0-9]{1,19}$ && "$tx_type" =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ ]] || return 1
     [ "$(_internal_hash_text "$data_to_verify")" = "$tx_hash" ] || return 1
@@ -26914,6 +27361,11 @@ _validate_single_transaction() {
     # --- 步骤 3: 分类别的状态与逻辑验证 ---
     # --- Step 3: State & Logic Verification by Type ---
     case "$tx_type" in
+        cooperative_command)
+            [ -z "${intra_block_state_tracker[cooperative_command]:-}" ] || return 1
+            _corium_work_consensus cooperative-validate "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$block_height" "$tx_payload" >/dev/null || return 1
+            intra_block_state_tracker[cooperative_command]=1
+            ;;
         ziokt_identity_register|ziokt_content|zkn_mint|zkn_transfer|zkn_private_transfer|zkc_issue|zkn_shield_deposit|zkn_shield_transfer|zkn_shield_withdraw|privacy_review_request|privacy_review_vote|privacy_review_revoke|privacy_review_disclose)
             _ziokt_asset_engine validate "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$tx_type" "$tx_payload" "$sender_id" || return 1
             ;;
@@ -27627,7 +28079,9 @@ blockchain_create_transaction() {
 
     # The data that gets signed and hashed does not include the signature itself.
     # 被签名和哈希的数据本身不包含签名。
-    local data_to_verify="{\"type\":\"$tx_type\",\"data\":$tx_data,\"timestamp\":$timestamp}"
+    local data_to_verify signing_height
+    signing_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE(MAX(height),-1)+1 FROM blocks;") || return 1
+    data_to_verify=$(_corium_transaction_bytes "$tx_type" "$tx_data" "$timestamp" "$public_key" "$signing_height") || return 1
     
     local tx_hash signature
     tx_hash=$(_internal_hash_text "$data_to_verify")
@@ -28479,6 +28933,19 @@ _internal_verify_object_hash() {
     if jq -e 'type=="object" and has("work")' "$2" >/dev/null 2>&1; then
         _corium_work_consensus verify-file "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$2" "$1" >/dev/null
         return $?
+    fi
+    if [[ "$CORIUM_NETWORK_ID" = ziokt-main-recovery-20261024 || "$CORIUM_NETWORK_ID" = ziokt-dna-side-20261024 ]] && jq -e 'type=="object" and keys==["data","public_key","signature","timestamp","type"]' "$2" >/dev/null 2>&1; then
+        local scoped_body scoped_height
+        scoped_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT MAX(height)+1 FROM blocks;") || return 1
+        scoped_body=$(_corium_transaction_bytes "$(jq -er .type "$2")" "$(jq -c .data "$2")" "$(jq -er .timestamp "$2")" "$(jq -er .public_key "$2")" "$scoped_height") || return 1
+        if [ "$(_internal_hash_text "$scoped_body")" = "$1" ]; then
+            local scoped_key
+            scoped_key=$(mktemp) || return 1
+            CORIUM_TEMP_ITEMS+=("$scoped_key")
+            jq -jr .public_key "$2" > "$scoped_key"
+            verify_signature "$scoped_body" "$(jq -er .signature "$2")" "$scoped_key"
+            return $?
+        fi
     fi
     "${PYTHON_CMD}" - "$2" "$1" "$BLOCKCHAIN_DB" <<'PY_OBJECT_VERIFY'
 def verify_object_file(path, expected, chain_path):
@@ -41569,6 +42036,9 @@ _update_chain_state_cache() {
                     msg=$(echo "$tx_payload" | jq -r .commit_message); format=$(echo "$tx_payload" | jq -r '.format // "md"')
                     db_execute_safe "$FORUM_DB" "INSERT OR IGNORE INTO wiki_versions (version_tx_hash, page_tx_hash, previous_version_hash, author_id, content_hash, commit_message, format, timestamp) VALUES (%s, %s, %s, %s, %s, %s, %s, %d);" "$tx_hash" "$page_tx_hash" "$prev_ver" "$sender_id" "$content_hash" "$msg" "$format" "$tx_timestamp"
                     db_execute_safe "$FORUM_DB" "UPDATE wiki_pages SET latest_version_hash = %s, attachment_hash = %s, locked_by_user_id = NULL, lock_tx_hash = NULL WHERE page_tx_hash = %s;" "$tx_hash" "$attachment_hash" "$page_tx_hash"
+                    ;;
+                cooperative_command)
+                    _corium_work_consensus cooperative-apply "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$height" "$tx_payload" >/dev/null || return 1
                     ;;
                 "nns_register")
                     local domain_name target_hash registration_type probes_json expires_at

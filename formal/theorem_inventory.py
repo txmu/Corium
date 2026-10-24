@@ -6,7 +6,7 @@ import re
 
 ROOT = Path(__file__).resolve().parent
 MODULES = ('Models', 'Implementation', 'Refinements', 'Consensus', 'StateMachine',
-           'Governance', 'OpenCI', 'Privacy', 'ContentFabric')
+           'Governance', 'OpenCI', 'Privacy', 'ContentFabric', 'DNA', 'Cooperatives')
 
 
 def inventory():
