@@ -64,7 +64,8 @@ remote node as the local node's own transport identity.
 Automatic consensus mining is stopped under a persisted safety hold. Existing
 blocks, transactions, immutable objects and derived state have not been rewritten.
 Consistent database backups preserve the current branch. Native deployment checks
-the hold BEFORE changing sources and does not restart held consensus. Gateway and
+the hold BEFORE changing sources and does not restart held consensus. A managed
+systemd ExecCondition also blocks startup/reboot while the hold is active or malformed. Gateway and
 MCP expose only allowlisted public hold fields, never private backup paths.
 Content/query services remain available; their availability is not history proof.
 
