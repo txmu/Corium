@@ -1,12 +1,14 @@
 """ConsensusValidationCore: Sovereign, deterministic PoW consensus and dynamic difficulty engine.
 
-This module provides the single authoritative consensus validation kernel for Ziokt/Corium.
-It strictly decouples open PoW mining from PoS governance and PoUW task attestations:
+This is an executable standalone consensus model, not the native admission kernel.
+Native production admission uses work_consensus.py embedded in corix_v108.sh.
+This module does not activate governed policies, execute transactions, or replay
+legacy PoS/application state. Ancestor database records are trusted model inputs.
+It decouples modeled open PoW mining from PoS governance and PoUW task attestations:
 - PoW: open to any valid secp256k1 key pair without staking or validator table registration.
 - Dynamic Difficulty: deterministic integer retargeting window with bounded timespan damping.
 - Cumulative Work: block_work = floor(2^256 / (target + 1)).
 - Fork Choice: greatest cumulative work with deterministic lexicographic tie-breaker.
-- Migration Anchors: preserves historical block weights for backwards compatibility.
 """
 import contextlib
 import hashlib
