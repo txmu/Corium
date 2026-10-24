@@ -21974,7 +21974,9 @@ dht_find_closest_nodes() {
     [[ "$target_id" =~ ^[a-f0-9]{64}$ && "$k" =~ ^[0-9]{1,3}$ && "$alpha" =~ ^[0-9]{1,3}$ ]] || return 1
     k=$((10#$k)); alpha=$((10#$alpha))
     [ "$k" -ge 1 ] && [ "$k" -le 256 ] && [ "$alpha" -ge 1 ] && [ "$alpha" -le 64 ] || return 1
-    declare -A queried_nodes candidates
+    declare -A queried_nodes=() candidates=()
+    local our_id
+    our_id=$(get_our_node_id) || return 1
     _distance() { kademlia_distance "$1" "$2"; }
 
     local initial_nodes
@@ -22010,8 +22012,10 @@ dht_find_closest_nodes() {
 
     for node_info in "${initial_nodes[@]}"; do
         local id distance; IFS='|' read -r id _ _ _ <<< "$node_info"
+        [ "$id" != "$our_id" ] || continue
         distance=$(_distance "$target_id" "$id"); candidates["$distance"]="$node_info"
     done
+    [ "${#candidates[@]}" -gt 0 ] || return 1
     
     local round=1
     while true; do
@@ -22041,6 +22045,7 @@ dht_find_closest_nodes() {
                 local new_peers_str="${BASH_REMATCH[1]}"
                 for new_peer in $new_peers_str; do
                     local new_id new_type new_addr new_port; _parse_full_address "$new_peer" || continue; new_id="$ADDR_NODE_ID"; new_type="$ADDR_TYPE"; new_addr="$ADDR_HOST"; new_port="$ADDR_PORT"
+                    [ "$new_id" != "$our_id" ] || continue
                     if [ -z "${queried_nodes[$new_id]+_}" ] && [ -n "$new_id" ]; then
                         dht_add_node "$new_id" "$new_type" "$new_addr" "${new_port:-NULL}"
                         local new_distance=$(_distance "$target_id" "$new_id"); candidates["$new_distance"]="${new_id}|${new_type}|${new_addr}|${new_port:-}"; found_new_nodes=1
@@ -22063,6 +22068,9 @@ dht_find_closest_nodes() {
         fi
         ((output_count+=1)); [ "$output_count" -ge "$k" ] && break
     done
+    # Returning the last loop comparison incorrectly reported failure whenever
+    # a useful routing table had fewer than k peers.
+    [ "$output_count" -gt 0 ]
 }
 
 
@@ -24354,7 +24362,9 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                 return {"status":"error","message":"Invalid block announcement binding"}
             if not re.fullmatch(r'[1-9][0-9]{0,4}',port) or int(port)>65535:
                 return {"status":"error","message":"Invalid announced port"}
-            public_key=self.get_peer_pubkey(sender_id)
+            # The envelope key was already bound to sender_id and its signature
+            # verified above. A second registry lookup rejects new unstaked peers.
+            public_key=sender_pubkey_str
             if not public_key or not verify_identity_signature('ANNOUNCE_BLOCK',os.environ.get('CORIUM_NETWORK_ID','default'),sender_id,(digest+'|'+height).encode(),signature,public_key):
                 return {"status":"error","message":"Invalid announcement signature"}
             known=db_query_ro(BLOCKCHAIN_DB_PATH,'SELECT height FROM blocks WHERE hash=?',(digest,),fetch_one=True)
@@ -26330,7 +26340,7 @@ import sys
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 
-EMBEDDED_SOURCE_DIGEST = 'e12de85cadb51e4a1687e870bf433f685bf1bf4fd53f07dc118b83cd44576367'
+EMBEDDED_SOURCE_DIGEST = '2afbfbb8fa44e4083a87819fa1b221d7193b209f4431632ea6a158b50047e010'
 PACKAGE='compute/openci-attested:1'
 SCHEMA='corium.openci-attested-bounties.v1'
 DOMAIN='OpenCI/worker-receipt/v1'
@@ -26406,6 +26416,11 @@ def proposal(db,network,payload,height):
 def active_policy(db,network,engine,height):
     row=db.execute('SELECT e.*,t.data AS proposal,t.block_height AS proposed_height FROM compute_engines e JOIN transactions t ON t.hash=e.engine_id WHERE e.engine_id=? AND t.type=\'propose_new_compute_engine\'',(engine,)).fetchone()
     require(row is not None and row['pkg_id']==PACKAGE and row['is_active']==1 and type(row['proposed_height']) is int,'governed active native engine required')
+    block=db.execute('SELECT transactions FROM blocks WHERE height=?',(row['proposed_height'],)).fetchone()
+    try:included=json.loads(block[0]) if block else None
+    except (ValueError,TypeError):included=None
+    require(type(included) is list and included.count(engine)==1,
+            'OPENCI_GOVERNANCE_NOT_COMMITTED: active proposal absent from canonical block')
     payload=json.loads(row['proposal']);value=proposal(db,network,payload,row['proposed_height'])
     require(row['compute_program_hash']==policy_digest(value) and row['verifier_script_hash']==source_digest(),'active engine commitment mismatch')
     require(value['activation_height']<=height<value['expiry_height'],'bounty admission height')
@@ -26626,7 +26641,7 @@ PACKAGE='consensus/work-weight:2'
 SCHEMA='corium.native-work-policy.v2'
 PROOF='corium.native-block-work.v2'
 LEGACY=hashlib.sha256(b'Corium/native-pos/v108').hexdigest()
-EMBEDDED_SOURCE_DIGEST = '989e79729b3e6077e6257237fd6dba43f5f81159779288728e2b8064193a6b94'
+EMBEDDED_SOURCE_DIGEST = 'cdb74a51c5d6b419560a544115e66020a6a1fa42d4e92aaac8be134d292d56bb'
 
 
 def require(test,message):
@@ -26673,7 +26688,7 @@ def proposal(db,network,payload,height):
 
 def active(db,network,height,validate_previous=True):
     if not (network.startswith('test-') or network.startswith('ziokt-test-') or network in {'ziokt-main','mainnet'}):return None
-    rows=db.execute("SELECT e.compute_program_hash,e.verifier_script_hash,t.data,t.block_height FROM compute_engines e JOIN transactions t ON t.hash=e.engine_id WHERE e.pkg_id=? AND e.is_active=1 AND t.type='propose_new_compute_engine' AND t.block_height IS NOT NULL ORDER BY t.block_height,t.hash",(PACKAGE,)).fetchall()
+    rows=db.execute("SELECT e.compute_program_hash,e.verifier_script_hash,t.data,t.block_height,t.hash,b.transactions FROM compute_engines e JOIN transactions t ON t.hash=e.engine_id LEFT JOIN blocks b ON b.height=t.block_height WHERE e.pkg_id=? AND e.is_active=1 AND t.type='propose_new_compute_engine' AND t.block_height IS NOT NULL ORDER BY t.block_height,t.hash",(PACKAGE,)).fetchall()
     genesis=db.execute('SELECT hash FROM blocks WHERE height=0').fetchone();require(genesis is not None,'native genesis required')
     accepted=[];previous=LEGACY
     for row in rows:
@@ -26681,6 +26696,13 @@ def active(db,network,height,validate_previous=True):
         except (ValueError, KeyError, TypeError):continue
         activation=value['work_policy']['activation_height']
         if activation>height:continue
+        # A database confirmation flag is not evidence of canonical inclusion.
+        # The enclosing prefix must already have passed header/transaction replay.
+        try:included=loads(row[5]) if row[5] is not None else None
+        except (ValueError,TypeError):included=None
+        require(type(included) is list and included.count(row[4])==1,
+                'WORK_GOVERNANCE_NOT_COMMITTED: active proposal absent from canonical block')
+        require(row['block_height']<height,'work proposal must precede candidate block')
         require(row['compute_program_hash']==policy_hash(value) and row['verifier_script_hash']==source_digest() and activation>=(row['block_height']+110 if row['block_height']>1 else 0),'active native governance commitment')
         if validate_previous:require(value['previous_policy']==previous and (not accepted or activation>accepted[-1]['work_policy']['activation_height']),'native activation sequence')
         checkpoint=value['checkpoint'];known=db.execute('SELECT hash FROM blocks WHERE height=?',(checkpoint['height'],)).fetchone();require(known is not None and known[0]==checkpoint['hash'],'governed checkpoint differs from native prefix')
@@ -33328,8 +33350,13 @@ _internal_sync_fetch_new_blocks_to_stage() {
     " || return 1
     info "[SYNC-FETCH] 正在查询最重链... / Querying heaviest chain..."
     local -a peers=() pids=()
-    mapfile -t peers < <(dht_find_closest_nodes "$my_node_id" 8)
-    [ ${#peers[@]} -gt 0 ] || { warn "[SYNC-FETCH] 未找到对等节点。 / No peers found."; return 0; }
+    local peer_list
+    peer_list=$(dht_find_closest_nodes "$my_node_id" 8) || {
+        warn "[SYNC-FETCH] 未找到对等节点，无法确认同步状态。 / No peers found; synchronization is unverified."
+        return 1
+    }
+    mapfile -t peers <<< "$peer_list"
+    [ ${#peers[@]} -gt 0 ] || return 1
     local temp_state_dir; temp_state_dir=$(mktemp -d) || return 1
     CORIUM_TEMP_ITEMS+=("$temp_state_dir")
     local peer_addr_string

@@ -45,9 +45,18 @@ class NativeOpenCIUnits(Fixture):
         self.proposal={'pkg_id':consensus.PACKAGE,'description':'governed test bounty','compute_program_hash':consensus.policy_digest(self.policy),'verifier_script_hash':consensus.source_digest(),'reward_weight':2,'openci_policy':self.policy}
         # Unit fixture state only; NativeOpenCILiveChain tests genuine governance.
         with sqlite3.connect(self.chain) as db:
+            body=json.dumps({'height':1,'previous_hash':genesis,'timestamp':1,'transactions':[self.engine]},separators=(',',':'))
+            db.execute('INSERT INTO blocks VALUES (?,?,?,?,?,?,?,?)',
+                       (1,hashlib.sha256(body.encode()).hexdigest(),genesis,1,self.identity,self.sign(body),json.dumps([self.engine]),1000))
             db.execute('INSERT INTO transactions VALUES(?,?,?,?,?,?,?)',(self.engine,'propose_new_compute_engine',json.dumps(self.proposal),'fixture',self.pem,1,1))
             db.execute('INSERT INTO compute_engines VALUES(?,?,?,?,?,1,2)',(self.engine,consensus.PACKAGE,'fixture',consensus.policy_digest(self.policy),consensus.source_digest()))
         self.payload=proof_for(self.policy,self.keys,self.engine)
+
+    def test_confirmation_flag_without_block_inclusion_is_rejected(self):
+        with sqlite3.connect(self.chain) as db:
+            db.execute("UPDATE blocks SET transactions='[]' WHERE height=1")
+        with self.assertRaisesRegex(ValueError,'OPENCI_GOVERNANCE_NOT_COMMITTED'):
+            self.check()
 
     def check(self,payload=None,sender=None,network=None,height=111):
         with sqlite3.connect(self.chain) as db:

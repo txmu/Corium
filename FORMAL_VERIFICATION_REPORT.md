@@ -69,3 +69,7 @@ The stable `formal-release-gate` job fails unless the full proof job succeeded.
 Repository branch protection must require that job; local source changes cannot
 prove hosted repository settings or a remote CI run succeeded. Release evidence
 records the actual local run and deployed source revisions separately.
+
+## Historical context incident (2026-10-24)
+
+[HISTORY-RECOVERY-2026-10-24.md](HISTORY-RECOVERY-2026-10-24.md) records an actual violation of the trusted-context premise: database confirmation flags did not imply signed canonical inclusion of governance proposals. Native Work/OpenCI now reject that case. Full production refinement and recovery of missing historical commitments remain outside the existing mathematical proofs.

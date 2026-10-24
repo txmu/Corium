@@ -24,12 +24,18 @@ class NativeWorkConsensusUnits(Fixture):
             genesis=db.execute('SELECT hash FROM blocks WHERE height=0').fetchone()[0]
         self.policy={'schema':work.SCHEMA,'previous_policy':work.LEGACY,'checkpoint':{'height':0,'hash':genesis},'work_policy':{'schema':WORK_SCHEMA,'network':self.network_id,'genesis':genesis,'activation_height':111,'difficulty_bits':4,'weights':[{'from_height':111,'weight':1000}]}}
         self.engine='a'*64;proposal={'pkg_id':work.PACKAGE,'work_consensus':self.policy,'compute_program_hash':work.policy_hash(self.policy),'verifier_script_hash':work.source_digest()}
-        # Signed-header prefix is a fixture, not a claim of governance activation.
-        for height in range(1,111):self.add_empty_block(height)
+        # Canonically bind the fixture proposal to its signed header. The active
+        # engine remains explicitly seeded: this fixture does not prove voting.
+        with sqlite3.connect(self.chain) as db:
+            body=json.dumps({'height':1,'previous_hash':genesis,'timestamp':1,'transactions':[self.engine]},separators=(',',':'))
+            db.execute('INSERT INTO blocks VALUES (?,?,?,?,?,?,?,?)',
+                       (1,hashlib.sha256(body.encode()).hexdigest(),genesis,1,self.identity,self.sign(body),json.dumps([self.engine]),1000))
+        for height in range(2,111):self.add_empty_block(height)
         with sqlite3.connect(self.chain) as db:
             db.execute('INSERT INTO transactions VALUES(?,?,?,?,?,?,?)',(self.engine,'propose_new_compute_engine',json.dumps(proposal),'fixture',self.pem,1,1))
             db.execute('INSERT INTO compute_engines VALUES(?,?,?,?,?,1,1)',(self.engine,work.PACKAGE,'fixture',work.policy_hash(self.policy),work.source_digest()))
             db.execute("INSERT OR REPLACE INTO chain_state VALUES('chain_info',?)",(db.execute('SELECT hash FROM blocks WHERE height=110').fetchone()[0]+'|110',))
+            db.execute("INSERT OR REPLACE INTO chain_state VALUES('last_processed_height','110')")
         self.key_file=self.etc/'identity.key'
         self.previous=self.tip()['hash']
 
@@ -75,6 +81,16 @@ class NativeWorkConsensusUnits(Fixture):
             db.execute('UPDATE compute_engines SET is_active=0')
             self.assertIsNone(work.active(db,self.network_id,111))
             with self.assertRaises(ValueError):work.mine(db,self.network_id,self.key_file,self.previous,111,[])
+
+    def test_off_chain_confirmation_flag_cannot_activate_consensus(self):
+        with sqlite3.connect(self.chain) as db:
+            db.row_factory=sqlite3.Row
+            self.assertIsNotNone(work.active(db,self.network_id,111))
+            db.execute("UPDATE blocks SET transactions='[]' WHERE height=1")
+            with self.assertRaisesRegex(ValueError,'WORK_GOVERNANCE_NOT_COMMITTED'):
+                work.active(db,self.network_id,111)
+            with self.assertRaisesRegex(ValueError,'WORK_GOVERNANCE_NOT_COMMITTED'):
+                work.mine(db,self.network_id,self.key_file,self.previous,111,[])
 
     def test_duplicate_json_and_bounds_reject(self):
         with self.assertRaises(ValueError):work.loads('{"height":1,"height":2}')

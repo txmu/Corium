@@ -13,11 +13,17 @@ class ReorgTests(Fixture):
         super().setUp()
         self.remote=self.root/'peer/chain.db';self.remote.parent.mkdir()
         with sqlite3.connect(self.chain) as src,sqlite3.connect(self.remote) as dst:src.backup(dst)
+        # The peer transport identity must differ from the local node identity;
+        # consensus blocks may still be signed by the shared genesis validator.
+        peer_key=ec.generate_private_key(ec.SECP256K1())
+        peer_public=peer_key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode().rstrip('\n')
+        self.peer_identity=hashlib.sha256(peer_public.encode()).hexdigest()
+        peer_public_file=self.root/'peer/identity.key.pub';peer_public_file.write_text(peer_public+'\n')
         os.environ['SCRIPT_PATH']=str(SOURCE)
         namespace={'__name__':'corium_reorg_gateway'};nodes=ast.parse(DAEMON).body
         boundary=next(i for i,n in enumerate(nodes) if isinstance(n,ast.ClassDef) and n.name=='SandboxAPI')
         exec(compile(ast.Module(body=nodes[:boundary],type_ignores=[]),str(SOURCE)+':daemon','exec'),namespace)
-        namespace.update(SCRIPT_PATH=str(SOURCE),BLOCKCHAIN_DB_PATH=str(self.remote),FORUM_DB_PATH=str(self.forum),DHT_DB_PATH=str(self.dht),USER_PUBLIC_KEY_FILE=str(self.etc/'identity.key.pub'),OUR_NODE_ID_CACHE=None)
+        namespace.update(SCRIPT_PATH=str(SOURCE),BLOCKCHAIN_DB_PATH=str(self.remote),FORUM_DB_PATH=str(self.forum),DHT_DB_PATH=str(self.dht),USER_PUBLIC_KEY_FILE=str(peer_public_file),OUR_NODE_ID_CACHE=None)
         self.ns=namespace
         server=http.server.ThreadingHTTPServer(('127.0.0.1',0),namespace['CoriumGatewayHandler'])
         self.port=server.server_address[1]-1000
@@ -37,7 +43,7 @@ class ReorgTests(Fixture):
         server.socket=ctx.wrap_socket(server.socket,server_side=True)
         self.thread=threading.Thread(target=server.serve_forever,daemon=True);self.thread.start()
         self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
-        self.run_core(f'dht_add_node {self.identity} tcp 127.0.0.1 {self.port}')
+        self.run_core(f'dht_add_node {self.peer_identity} ipv4 127.0.0.1 {self.port}')
         self.genesis=self.tip(self.chain)
     def tip(self,path):
         with sqlite3.connect(path) as db:return db.execute('SELECT hash FROM blocks ORDER BY height DESC LIMIT 1').fetchone()[0]

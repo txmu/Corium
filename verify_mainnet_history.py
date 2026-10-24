@@ -15,6 +15,7 @@ import os
 import subprocess
 import tempfile
 import re
+import signal
 from typing import Dict, Any, Optional
 
 from cryptography.hazmat.primitives import serialization, hashes
@@ -58,6 +59,7 @@ def replay_native_history(root: str, height: int, network: str = NETWORK_ID,
 source "$1"
 trap 'printf "NATIVE_REPLAY_FAILURE line=%s height=%s\\n" "$LINENO" "${bh:-setup}" >&2' ERR
 load_config || exit 1
+mkdir -p "$BUILD_TMP_DIR_BASE"
 _internal_replay_chain_state "$2" "$3"
 BLOCKCHAIN_DB="$3/chain.db"
 FORUM_DB="$3/forum.db"
@@ -66,14 +68,20 @@ INSTALLED_DB="$3/installed"
 _internal_semantic_state
 '''
     with tempfile.TemporaryDirectory(prefix='corium-history-replay-') as directory:
-        result = subprocess.run(['bash', '-c', command, 'history-replay', str(script.resolve()),
-                                 str(height), directory], env=env, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
-        if result.returncode:
-            markers = re.findall(r'NATIVE_REPLAY_FAILURE line=[0-9]+ height=(?:[0-9]+|setup)', result.stderr)
+        process = subprocess.Popen(['bash', '-c', command, 'history-replay', str(script.resolve()),
+                                    str(height), directory], env=env, text=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(timeout=180)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise TimeoutError('Native replay exceeded the 180 second resource limit') from None
+        if process.returncode:
+            markers = re.findall(r'NATIVE_REPLAY_FAILURE line=[0-9]+ height=(?:[0-9]+|setup)', stderr)
             location = ': ' + markers[0] if markers else ''
             raise ValueError('Native history replay rejected the supplied history' + location)
-        state = json.loads(result.stdout.splitlines()[-1])
+        state = json.loads(stdout.splitlines()[-1])
         return {'status': 'NATIVE_REPLAY_COMPLETED', 'height': height,
                 'reconstructed_state_digest': sha256_hex(canonical_json(state)),
                 'source_sha256': sha256_hex(script.read_bytes()),
