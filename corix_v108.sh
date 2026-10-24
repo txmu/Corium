@@ -22132,21 +22132,56 @@ dht_store_chunk() {
         "$chunk_hash" "$file_path" "$offset" "$size" || return 1
     # Local persistence is durable even when an announcement cannot reach a peer.
     # 本地保存成功不依赖对等节点在线；公告失败必须明确报告。
-    dht_announce_chunk "$chunk_hash" >/dev/null || warn "数据块已本地保存，网络公告未完成。 / Chunk stored locally; network announcement incomplete."
+    dht_announce_chunk "$chunk_hash" >/dev/null || true
 }
 
 
 # --- [重构][V55.4] dht_announce_chunk ---
 dht_announce_chunk() {
-    local chunk_hash="$1" nodes node_addr_string node_id failed=0
+    local chunk_hash="$1" nodes node_addr_string node_id
     [[ "$chunk_hash" =~ ^[a-f0-9]{64}$ ]] || return 1
-    nodes=$(dht_find_closest_nodes "$chunk_hash") || return 1
+    nodes=$(dht_find_closest_nodes "$chunk_hash" 2>/dev/null) || nodes=""
+    if [ -z "$nodes" ]; then
+        info "[PROPAGATION:NO_DHT_TARGETS] 没有可用 DHT 公告目标。 (No available DHT announcement targets.)"
+        return 1
+    fi
+    local total=0 success=0 timeouts=0 rejections=0 failures=0
     while IFS= read -r node_addr_string; do
-        _parse_full_address "$node_addr_string" || continue; node_id="$ADDR_NODE_ID"
+        [ -n "$node_addr_string" ] || continue
+        _parse_full_address "$node_addr_string" || continue
+        node_id="$ADDR_NODE_ID"
         [ -n "$node_id" ] || continue
-        dht_send_message "$node_id" "STORE" "$chunk_hash" "$(get_our_node_id)" || failed=1
+        total=$((total + 1))
+        local send_rc=0
+        dht_send_message "$node_id" "STORE" "$chunk_hash" "$(get_our_node_id)" >/dev/null 2>&1 || send_rc=$?
+        case "$send_rc" in
+            0) success=$((success + 1)) ;;
+            2) timeouts=$((timeouts + 1)) ;;
+            3) rejections=$((rejections + 1)) ;;
+            *) failures=$((failures + 1)) ;;
+        esac
     done <<< "$nodes"
-    return "$failed"
+    if [ "$total" -eq 0 ]; then
+        info "[PROPAGATION:NO_DHT_TARGETS] 没有可用 DHT 公告目标。 (No available DHT announcement targets.)"
+        return 1
+    elif [ "$success" -eq "$total" ]; then
+        info "[PROPAGATION:BROADCAST_SUCCESS] 有目标且发送成功 ($success/$total)。 (DHT chunk announcement succeeded ($success/$total).)"
+        return 0
+    elif [ "$success" -gt 0 ]; then
+        warn "[PROPAGATION:BROADCAST_PARTIAL] 只有部分目标成功 (成功: $success/$total, 超时: $timeouts, 拒绝: $rejections, 失败: $failures)。 (DHT chunk announcement partially succeeded ($success/$total).)"
+        return 1
+    else
+        if [ "$rejections" -gt 0 ]; then
+            warn "[PROPAGATION:PEER_REJECTED] 对端明确拒绝 DHT 公告 (拒绝数: $rejections/$total)。 (Peer explicitly rejected DHT announcement ($rejections/$total).)"
+            return 1
+        elif [ "$timeouts" -gt 0 ]; then
+            warn "[PROPAGATION:ACK_TIMEOUT] 已发送但无法确认接收 (超时数: $timeouts/$total)。 (DHT announcement ACK timed out ($timeouts/$total).)"
+            return 1
+        else
+            warn "[PROPAGATION:BROADCAST_FAILED] 有目标但全部失败 (不可达节点数: $failures/$total)。 (DHT chunk announcement failed ($failures/$total).)"
+            return 1
+        fi
+    fi
 }
 
 
@@ -22383,6 +22418,7 @@ _dht_send_message_direct() {
     fi
     # 遍历并尝试连接每一个地址
     # Iterate and attempt to connect to each address
+    local last_send_failure=1
     for node_addr_line in "${node_addresses[@]}"; do
         local address_type address port
         IFS='|' read -r address_type address port <<< "$node_addr_line"
@@ -22507,6 +22543,9 @@ _dht_send_message_direct() {
         # ==================================================================
         
         if [ "$curl_exit_code" -ne 0 ]; then
+            if [ "$curl_exit_code" -eq 28 ]; then
+                last_send_failure=2 # ACK_TIMEOUT
+            fi
             if [[ "$response" == *"certificate verify failed"* ]] || [[ "$response" == *"server certificate changed"* ]]; then
                  warn "节点 $target_host:$target_port 的TLS证书已变更或无效。将移除旧证书并于下次重试。/ Peer $target_host:$target_port's TLS certificate has changed or is invalid. Removing old cert for next retry."
                  warn "缓存的信任证书予以保留；更换证书必须重新确认。/ Cached trust certificate retained; replacement requires confirmation."
@@ -22527,20 +22566,21 @@ _dht_send_message_direct() {
             continue
         fi
 
-        local status; status=$(echo "$response" | jq -r .status)
+        local status; status=$(echo "$response" | jq -r .status 2>/dev/null)
         if [ "$status" = "success" ]; then
-            echo "$response" | jq -r .data
+            echo "$response" | jq -r .data 2>/dev/null
             return 0 # 成功！立即返回。 / Success! Return immediately.
         else
-            local error_message; error_message=$(echo "$response" | jq -r .message)
+            last_send_failure=3 # PEER_REJECTED
+            local error_message; error_message=$(echo "$response" | jq -r .message 2>/dev/null)
             debug "[DHT-SEND] Peer https://$target_host:$target_port returned an error: $error_message"
             continue
         fi
     done
 
-    # 如果循环结束都没有成功，则返回失败
-    # If the loop finishes without any success, return failure
-    return 1
+    # 如果循环结束都没有成功，则返回具体的失败原因代码
+    # If the loop finishes without success, return the specific failure code (2: timeout, 3: rejected, 1: general error)
+    return "$last_send_failure"
 }
 
 
@@ -22577,9 +22617,12 @@ dht_send_message() {
     # --- 策略 1: 尝试直接连接所有已知地址 ---
     # --- Strategy 1: Attempt direct connection to all known addresses ---
     detail "[P2P-SEND] 正在尝试直接连接到节点 ${target_node_id:0:12}... / Attempting direct connection to peer ${target_node_id:0:12}..."
+    local direct_rc=0
     if output=$(_dht_send_message_direct "$target_node_id" "$message_type" "$payload"); then
         echo "$output"
         return 0
+    else
+        direct_rc=$?
     fi
 
     # --- 策略 2: 如果直接连接失败，并且启用了打洞，则尝试NAT打洞 ---
@@ -22625,7 +22668,7 @@ dht_send_message() {
     # 如果运行到这里，说明所有方法都失败了
     # If we get here, all methods have failed
     warn "[P2P-SEND] 所有连接方法均失败，无法联系节点 ${target_node_id:0:12}。 / All connection methods failed for peer ${target_node_id:0:12}."
-    return 1
+    return "${direct_rc:-1}"
 }
 
 # =======================================================
@@ -27990,8 +28033,8 @@ blockchain_mine_block() (
     if [ -z "$mining_original_fs" ] && [ -n "$CURRENT_TRANSACTION_BACKUP_PATH" ]; then _commit_transaction || return 1; fi
     db_commit_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB" || return 1
     mining_committed=true
-    dht_announce_chunk "$block_hash" >/dev/null || warn "区块已提交，DHT 公告未完成。 / Block committed; DHT announcement incomplete."
-    _blockchain_broadcast_new_block "$block_hash" || warn "区块已提交，但广播未完成。/ Block committed; broadcast incomplete."
+    dht_announce_chunk "$block_hash" >/dev/null || true
+    _blockchain_broadcast_new_block "$block_hash" || true
     msg "新区块 $height (哈希: $block_hash) 已本地提交；传播结果见上方日志。 (New block $height (hash: $block_hash) committed locally; see propagation results above.)"
     echo "$block_hash"
     
@@ -28258,12 +28301,18 @@ _blockchain_broadcast_new_block() {
     local height
     height=$(db_query_safe "$BLOCKCHAIN_DB" \
         "SELECT height FROM blocks WHERE hash = %s;" \
-        "$block_hash")
+        "$block_hash") || return 1
     
     # Announce to a set of diverse peers in the network.
     # 向网络中一组多样化的对等节点进行宣告。
     local peers
-    peers=$(dht_find_closest_nodes "$(get_our_node_id)" 8) || return 1
+    peers=$(dht_find_closest_nodes "$(get_our_node_id)" 8 2>/dev/null) || peers=""
+
+    # 1. 检查是否存在远端节点 (Check if remote peers exist)
+    if [ -z "$peers" ]; then
+        info "[PROPAGATION:NO_REMOTE_PEERS] 没有远端节点，区块已本地安全提交。 (No remote peers available; block committed locally.)"
+        return 0
+    fi
 
     # --- NEW: Prepare data for signing ---
     # --- 新增: 准备用于签名的数据 ---
@@ -28276,14 +28325,46 @@ _blockchain_broadcast_new_block() {
     our_node_id=$(get_our_node_id)
     
     info "正在向对等节点广播已签名的新区块宣告... (Broadcasting signed new block announcement to peers...)"
-    local address node_id failed=0
+    local address node_id total=0 success=0 timeouts=0 rejections=0 failures=0
     while IFS= read -r address; do
+        [ -n "$address" ] || continue
         _parse_full_address "$address" || continue
         node_id="$ADDR_NODE_ID"
+        [ -n "$node_id" ] || continue
+        total=$((total + 1))
+        local send_rc=0
         dht_send_message "$node_id" "ANNOUNCE_BLOCK" \
-            "${block_hash}|${height}|$(get_our_ip)|${P2P_PORT}|${our_node_id}|${signature}" || failed=1
+            "${block_hash}|${height}|$(get_our_ip)|${P2P_PORT}|${our_node_id}|${signature}" || send_rc=$?
+        case "$send_rc" in
+            0) success=$((success + 1)) ;;
+            2) timeouts=$((timeouts + 1)) ;;
+            3) rejections=$((rejections + 1)) ;;
+            *) failures=$((failures + 1)) ;;
+        esac
     done <<< "$peers"
-    return "$failed"
+
+    if [ "$total" -eq 0 ]; then
+        info "[PROPAGATION:NO_REMOTE_PEERS] 没有远端节点，区块已本地安全提交。 (No remote peers available; block committed locally.)"
+        return 0
+    elif [ "$success" -eq "$total" ]; then
+        info "[PROPAGATION:BROADCAST_SUCCESS] 有目标且发送成功 ($success/$total)。 (Block broadcast succeeded to all targets ($success/$total).)"
+        return 0
+    elif [ "$success" -gt 0 ]; then
+        warn "[PROPAGATION:BROADCAST_PARTIAL] 只有部分目标成功 (成功: $success/$total, 超时: $timeouts, 拒绝: $rejections, 失败: $failures)。 (Block broadcast partially succeeded ($success/$total).)"
+        return 1
+    else
+        # 所有目标均失败 (All targets failed)
+        if [ "$rejections" -gt 0 ]; then
+            warn "[PROPAGATION:PEER_REJECTED] 对端明确拒绝区块 (拒绝数: $rejections/$total)。 (Peer explicitly rejected block ($rejections/$total).)"
+            return 1
+        elif [ "$timeouts" -gt 0 ]; then
+            warn "[PROPAGATION:ACK_TIMEOUT] 已发送但无法确认接收 (超时数: $timeouts/$total)。 (Block announcement ACK timed out ($timeouts/$total).)"
+            return 1
+        else
+            warn "[PROPAGATION:BROADCAST_FAILED] 有目标但全部失败 (不可达节点数: $failures/$total)。 (Block broadcast failed to all targets ($failures/$total).)"
+            return 1
+        fi
+    fi
 }
 
 # =======================================================================================
