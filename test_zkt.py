@@ -74,6 +74,29 @@ class CoriumZKTTests(unittest.TestCase):
         self.assertEqual(acct["shadow6_core_reputation"], 0)
         self.assertEqual(acct["claims_count"], 1)
 
+    def test_native_signed_governance_cli_and_duplicate_evidence(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+        keys=[Ed25519PrivateKey.generate() for _ in range(2)]
+        pub=[k.public_key().public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw).hex() for k in keys]
+        policy=json.loads(self.invoke('zkt','status').stdout)['policy']
+        policy['governance']={'authorities':dict(zip(pub,['one','two'])),'threshold':2,'minimum_domains':2,'veto_threshold':2,'timelock_seconds':60,'voting_period_seconds':3600}
+        self.assertEqual(self.invoke('zkt','policy',json.dumps(policy)).returncode,0)
+        nxt=json.loads(json.dumps(policy));nxt['version']+=1
+        def encode(value):return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
+        def signed(value,i):
+            domain='Ziokt/zkt-governance/v1'
+            return json.dumps({'schema':'ziokt.signed.v1','domain':domain,'public_key':pub[i],'payload':value,'signature':keys[i].sign((domain+'\n').encode()+encode(value)).hex()})
+        now=int(time.time());doc={'operation':'propose','network_id':policy['network_id'],'base_policy':hashlib.sha256(encode(policy)).hexdigest(),'policy':nxt,'nonce':'1'*64,'created_at':now,'activate_at':now+60,'expires_at':now+600}
+        result=self.invoke('zkt','propose',signed(doc,0));self.assertEqual(result.returncode,0,result.stderr);pid=json.loads(result.stdout)['proposal']
+        for i in range(2):
+            ballot=signed({'operation':'vote','network_id':policy['network_id'],'proposal':pid,'approve':True},i)
+            result=self.invoke('zkt','vote',ballot);self.assertEqual(result.returncode,0,result.stderr)
+            self.assertNotEqual(self.invoke('zkt','vote',ballot).returncode,0)
+        self.assertNotEqual(self.invoke('zkt','enact',json.dumps({'proposal':pid})).returncode,0)
+        self.assertNotEqual(self.invoke('zkt','policy',json.dumps(nxt)).returncode,0)
+        status=json.loads(self.invoke('zkt','proposals','{}').stdout);self.assertEqual(status['proposals'][0]['id'],pid)
+
     def test_corix_zkt_via_federation_rpc(self):
         # Enable federation
         config = self.root / "etc/corix/networks/default/corix.conf"
