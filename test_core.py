@@ -55,6 +55,17 @@ class Fixture(unittest.TestCase):
             db.execute('INSERT INTO blocks VALUES (?,?,?,?,?,?,?,?)',(height,blockhash,previous,timestamp,self.identity,signature or self.sign(content),'[]',height*1000))
         return blockhash
 class CoreTests(Fixture):
+    def test_repository_sync_without_peers_does_not_claim_chain_sync_or_mine(self):
+        with closing(sqlite3.connect(self.chain)) as db:
+            before=db.execute('SELECT height,hash FROM blocks ORDER BY height').fetchall()
+        self.run_core('mkdir -p "$REPOS_CONF_DIR"; corix_sync --repositories-only')
+        with closing(sqlite3.connect(self.chain)) as db:
+            self.assertEqual(db.execute('SELECT height,hash FROM blocks ORDER BY height').fetchall(),before)
+        failed=self.run_core('corix_sync',False)
+        self.assertNotEqual(failed.returncode,0)
+        with closing(sqlite3.connect(self.chain)) as db:
+            self.assertEqual(db.execute('SELECT height,hash FROM blocks ORDER BY height').fetchall(),before)
+
     def test_phoenix_deterministic_replay_from_corrupted_local_derived_state(self):
         first=self.snapshot()
         with sqlite3.connect(self.chain) as db:db.execute("UPDATE system_params SET param_value='poisoned'")

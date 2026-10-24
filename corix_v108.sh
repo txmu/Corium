@@ -29507,8 +29507,8 @@ corix_upgrade() {
     _begin_transaction "$INSTALLED_DB"
     trap 'release_lock "system"' RETURN
     
-    # Sync repositories first
-    corix_sync
+    # Package metadata is independent of peer availability and chain mining.
+    corix_sync --repositories-only || return 1
     
     msg "Checking for upgradeable packages..."
     local world_pkgs
@@ -34014,6 +34014,8 @@ PY_CHAIN_NUM
 # =======================================================================================
 corix_sync() (
     set -e
+    local scope="${1:-full}"
+    [[ "$scope" == full || "$scope" == --repositories-only ]] && [ "$#" -le 1 ] || return 2
     check_permissions "sync"
     acquire_lock "network"
     local staging_db; staging_db=$(mktemp)
@@ -34064,6 +34066,10 @@ corix_sync() (
     # --- [核心修正] 在仓库同步后，更新所有缓存 ---
     _update_metadata_cache
     corix_search_update_index >/dev/null
+    if [ "$scope" = --repositories-only ]; then
+        _run_hooks "post-sync"
+        return 0
+    fi
 
     # --- 阶段 1: 预取与预扫描 (区块链部分) ---
     local last_processed_height; last_processed_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE((SELECT value FROM chain_state WHERE key = 'last_processed_height'),'-1');") || return 1
