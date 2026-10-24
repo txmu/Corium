@@ -37906,6 +37906,11 @@ PY_CTX
     [ -S "$ipc_socket" ] || ipc_socket="/tmp/corix.${CORIUM_NETWORK_ID_OVERRIDE:-default}.sock"
 
     # 3. Setup sandbox using bwrap
+    # Use the same trusted interpreter/dependencies inside and outside the
+    # namespace. CI often installs RestrictedPython in a venv outside /usr.
+    local runtime_json runtime_python runtime_root
+    runtime_json=$(python3 -c 'import json,sys,os,RestrictedPython; print(json.dumps({"python":sys.executable,"roots":list(dict.fromkeys([sys.prefix,sys.base_prefix])),"home":os.path.expanduser("~")}))') || return 1
+    runtime_python=$(jq -er .python <<< "$runtime_json") || return 1
     local -a bwrap_args=(
         "--unshare-all" "--die-with-parent" "--new-session"
         "--proc" "/proc" "--dev" "/dev"
@@ -37919,6 +37924,13 @@ PY_CTX
     )
     [ -d /lib64 ] && bwrap_args+=(--ro-bind /lib64 /lib64)
     [ -d /etc/alternatives ] && bwrap_args+=(--ro-bind /etc/alternatives /etc/alternatives)
+    while IFS= read -r runtime_root; do
+        case "$runtime_root" in /usr|/usr/*|/bin|/bin/*|/lib|/lib/*|/lib64|/lib64/*) continue ;; esac
+        # Never expose a broad host tree just because of a custom Python prefix.
+        [[ "$runtime_root" = /* && "$runtime_root" != / && "$runtime_root" != /home && "$runtime_root" != /root && "$runtime_root" != /tmp && "$runtime_root" != "$(jq -r .home <<< "$runtime_json")" ]] || return 1
+        [ -d "$runtime_root" ] || return 1
+        bwrap_args+=(--ro-bind "$runtime_root" "$runtime_root")
+    done < <(jq -r '.roots[]' <<< "$runtime_json")
     if [ -S "$ipc_socket" ]; then
         touch "${temp_dir}/corix.sock"
         bwrap_args+=(--ro-bind "$ipc_socket" "/app/corix.sock")
@@ -37926,9 +37938,9 @@ PY_CTX
     
     # Run sandbox and capture output
     if command -v bwrap >/dev/null 2>&1; then
-        timeout --kill-after=2s "5s" prlimit --as=134217728 bwrap "${bwrap_args[@]}" python3 /app/runner.py "$query_params_json" "$app_id"
+        timeout --kill-after=2s "5s" prlimit --as=134217728 bwrap "${bwrap_args[@]}" "$runtime_python" -I /app/runner.py "$query_params_json" "$app_id"
     else
-        python3 "${temp_dir}/runner.py" "$query_params_json" "$app_id"
+        "$runtime_python" -I "${temp_dir}/runner.py" "$query_params_json" "$app_id"
     fi
     
     rm -rf "$temp_dir"
