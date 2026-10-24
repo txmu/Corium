@@ -162,6 +162,18 @@ structure GovernedContext where
   activationHeight : Nat
   policyApproved : Bool
   expectedTarget : Nat
+  proposalHash : Nat
+  proposalHeight : Nat
+  proposalBlockHeight : Nat
+  committedTransactions : List Nat
+  proposalHeaderVerified : Bool
+  proposalTransactionVerified : Bool
+
+def governanceBound (s : GovernedContext) : Prop :=
+  s.proposalHash ∈ s.committedTransactions ∧
+  s.proposalHeight = s.proposalBlockHeight ∧ s.proposalHeight ≤ s.parentHeight ∧
+  (s.proposalHeight ≤ 1 ∨ s.proposalHeight + 110 ≤ s.activationHeight) ∧
+  s.proposalHeaderVerified = true ∧ s.proposalTransactionVerified = true
 
 structure SignedCandidate where
   height : Nat
@@ -173,14 +185,14 @@ structure SignedCandidate where
   transactionsVerified : Bool
 
 def protocolValid (s : GovernedContext) (b : SignedCandidate) : Prop :=
-  s.policyApproved = true ∧ b.height ≥ s.activationHeight ∧
+  governanceBound s ∧ s.policyApproved = true ∧ b.height ≥ s.activationHeight ∧
   b.height = s.parentHeight + 1 ∧ b.previousHash = s.parentHash ∧
   validTarget s.expectedTarget ∧ b.signatureVerified = true ∧
   b.transactionsVerified = true ∧ b.nonceDigest ≤ s.expectedTarget ∧
   (b.claimedTarget = none ∨ b.claimedTarget = some s.expectedTarget)
 
 instance (s : GovernedContext) (b : SignedCandidate) : Decidable (protocolValid s b) :=
-  by unfold protocolValid validTarget; infer_instance
+  by unfold protocolValid governanceBound validTarget; infer_instance
 
 def validateAndCredit (s : GovernedContext) (b : SignedCandidate) : Option Nat :=
   if protocolValid s b then some (s.parentWork + blockWork s.expectedTarget) else none
@@ -199,11 +211,24 @@ theorem false_target_cannot_receive_credit (s : GovernedContext) (b : SignedCand
     (hdiff : claimed ≠ s.expectedTarget) : validateAndCredit s b = none := by
   have invalid : ¬ protocolValid s b := by
     intro valid
-    rcases valid.2.2.2.2.2.2.2.2 with absent | equal
+    rcases valid.2.2.2.2.2.2.2.2.2 with absent | equal
     · rw [hclaim] at absent
       contradiction
     · rw [hclaim] at equal
       exact hdiff (Option.some.inj equal)
+  simp [validateAndCredit, invalid]
+
+theorem credited_work_requires_committed_governance (s : GovernedContext) (b : SignedCandidate)
+    (total : Nat) (h : validateAndCredit s b = some total) :
+    s.proposalHash ∈ s.committedTransactions := by
+  have valid := (credited_work_uses_governed_target s b total h).1
+  exact valid.1.1
+
+theorem uncommitted_governance_cannot_receive_credit (s : GovernedContext) (b : SignedCandidate)
+    (absent : s.proposalHash ∉ s.committedTransactions) : validateAndCredit s b = none := by
+  have invalid : ¬ protocolValid s b := by
+    intro valid
+    exact absent valid.1.1
   simp [validateAndCredit, invalid]
 
 -- These model entrypoints intentionally delegate to one kernel. Production

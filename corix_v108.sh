@@ -25967,7 +25967,18 @@ PY_GENESIS_VALIDATE
 #
 # 新增、完整且已加固: 执行到一条新的、更重的链的链重组操作。
 # [已修改] 此版本现在使用一个内存缓存来避免在复杂重组期间重复验证同一个交易，从而显著提升性能。
+_internal_consensus_safety_check() {
+    local hold_file="${CORIUM_CONSENSUS_HOLD_FILE:-${CORIUM_ROOT%/}/../config/consensus-safety-hold.json}"
+    if [ ! -e "$hold_file" ] && [ ! -L "$hold_file" ]; then return 0; fi
+    local guard="$(dirname "$SCRIPT_PATH")/consensus_hold.py"
+    if [ ! -f "$guard" ] || ! "$PYTHON_CMD" "$guard" "$hold_file"; then
+        warn "CONSENSUS_SAFETY_HOLD: canonical state mutation is suspended; read-only verification remains available."
+        return 1
+    fi
+}
+
 _blockchain_reorganize_to() (
+    _internal_consensus_safety_check || return 1
     set -e
     local new_tip_hash="$1"
     local peer_ip="$2"
@@ -27375,6 +27386,7 @@ blockchain_get_latest_hash() {
 # Mining/validation process (PoS) with P2P broadcast
 # 挖矿/验证过程 (PoS)，包含P2P广播功能
 blockchain_mine_block() (
+    _internal_consensus_safety_check || return 1
     set -e
     acquire_lock "system" || return 1
     local mining_committed=false mining_original_fs="$CURRENT_TRANSACTION_BACKUP_PATH"
@@ -33342,6 +33354,7 @@ _resolve_repo_hash() {
 # @return 0 on success, 1 on failure. Also returns the peer_id of the sync source via stdout.
 #         成功返回0，失败返回1。同时通过stdout返回同步源的peer_id。
 _internal_sync_fetch_new_blocks_to_stage() {
+    _internal_consensus_safety_check || return 1
     local staging_db_path="$1" last_known_height="$2"
     local my_node_id; my_node_id=$(get_our_node_id) || return 1
     db_init "$staging_db_path" "
@@ -42807,6 +42820,7 @@ PY_STATE
 # Import the existing Phoenix V2 state only after validating its signed canonical root.
 # 先验证签名、规范状态根与完整表结构，再原子恢复 Phoenix V2 状态。
 _internal_import_phoenix_state() {
+    _internal_consensus_safety_check || return 1
     [ $# -eq 1 ] || return 1
     db_begin_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" || return 1
     if ! "${PYTHON_CMD}" - "$1" "$BLOCKCHAIN_DB" "$FORUM_DB" <<'PY_PHOENIX_IMPORT'
@@ -42934,6 +42948,7 @@ PY_PHOENIX_IMPORT
 # local subscriptions, pending transactions and transport metadata.
 # 用规范链重放重建派生状态，保留本地订阅、待确认交易和传输元数据。
 _internal_rebuild_derived_state() {
+    _internal_consensus_safety_check || return 1
     local replay_dir height
     height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT MAX(height) FROM blocks;") || return 1
     replay_dir=$(mktemp -d -p "$BUILD_TMP_DIR_BASE" "reorg-replay.XXXXXX") || return 1

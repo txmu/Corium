@@ -67,7 +67,7 @@ Consistent database backups preserve the current branch. Native deployment check
 the hold BEFORE changing sources and does not restart held consensus. A managed
 systemd ExecCondition also blocks startup/reboot while the hold is active or malformed. Gateway and
 MCP expose only allowlisted public hold fields, never private backup paths.
-Content/query services remain available; their availability is not history proof.
+Mining, reorganization, sync staging, snapshot import and live derived-state rebuild also share the same local safety check. Read-only replay remains available. Content/query services remain available; their availability is not history proof.
 
 Recovery requires either authentic historical protocol/activation/registration
 records or an explicit decision to establish a new valid branch/network. A new
