@@ -19,6 +19,7 @@ GROUPS = {
     'Database snapshot depth': ['db_begin_transaction', 'db_commit_transaction',
                                 '_internal_db_restore_snapshot'],
     'Checked replay and reorganization': ['_internal_replay_chain_state', '_blockchain_reorganize_to'],
+    'Bootstrap history safety and explicit discovery': ['_internal_consensus_safety_check', 'dht_bootstrap', 'blockchain_create_genesis_block'],
 }
 
 

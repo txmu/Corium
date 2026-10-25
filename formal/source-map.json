@@ -28,6 +28,11 @@
     "Checked replay and reorganization": [
       "_internal_replay_chain_state",
       "_blockchain_reorganize_to"
+    ],
+    "Bootstrap history safety and explicit discovery": [
+      "_internal_consensus_safety_check",
+      "dht_bootstrap",
+      "blockchain_create_genesis_block"
     ]
   },
   "sha256": {
@@ -44,6 +49,9 @@
     "db_commit_transaction": "ccf3891e1ccd89a3230e8e47ac10be0f540ecb24b3bb804663a8e6e53e87ab5c",
     "_internal_db_restore_snapshot": "c6507c6d1c8742375feb4861154e0dd0724d9828f05e0f2ac5307883cd4ec539",
     "_internal_replay_chain_state": "b6ab11cdd128888bdc663f469b7b3dd3253331f7f49816db821e41f796022b09",
-    "_blockchain_reorganize_to": "33ad30e1d7afc9e1697667402cdb6d0da9f56451bebed44524b02db613b18db5"
+    "_blockchain_reorganize_to": "33ad30e1d7afc9e1697667402cdb6d0da9f56451bebed44524b02db613b18db5",
+    "_internal_consensus_safety_check": "6336d5f7a0ad9db641ada541d316c972c4a917e1547a8180065b0db636f964f9",
+    "dht_bootstrap": "0fec92c6f18f2e42093aa6fc27012b4e897720724202de57f8d7414c320af794",
+    "blockchain_create_genesis_block": "fc3013d65744bc693896667d1620d6f260e349d56dfb14c53e6359bfc8d3363a"
   }
 }
