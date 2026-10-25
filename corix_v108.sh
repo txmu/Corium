@@ -27629,7 +27629,23 @@ PY_CORIUM_WORK_CONSENSUS
 _corium_gimps_consensus() (
     ulimit -t 10 -v 262144 || exit 2
     "${PYTHON_CMD:-python3}" - "$@" <<'PY_CORIUM_GIMPS_CONSENSUS'
-"""Native verification, task state lifecycle, and settlement for GIMPS (Mersenne prime search) proofs."""
+"""Native verification, task state lifecycle, and settlement for GIMPS (Mersenne prime search) proofs.
+
+Supports:
+1. Versioned schema 'corium.gimps-proof.v1' and backward-compatible legacy format.
+2. Full Lucas-Lehmer recomputation for exponents 2..4096; larger exponents and
+   unimplemented factoring methods fail closed until a bounded verifier is provided.
+3. Task state lifecycle:
+   - assigned: task dispatched with an unexpired lease
+   - submitted: transaction present in mempool or confirmed block
+   - verified: confirmed into block, pending in challenge window
+   - settled: challenge window passed unchallenged, recorded in completed_compute_tasks
+   - failed / retry: challenged and proven invalid, or expired without submission
+4. Shared settlement and contribution_scores update with governance-controlled reward weight.
+5. Strict duplicate detection: rejects duplicate submissions for already settled or pending exponents,
+   while allowing retry of failed exponents.
+"""
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -27643,6 +27659,7 @@ PACKAGE = 'corium/built-in-gimps'
 SCHEMA = 'corium.gimps-proof.v1'
 MAX_INTEGER = 2**63 - 1
 DEFAULT_LEASE_SECONDS = 600
+MAX_VERIFIED_EXPONENT = 4096
 
 
 def canonical(value, ascii=False):
@@ -27664,7 +27681,8 @@ def integer(value, low, high):
 
 
 def lucas_lehmer_verify(p, claimed_residue):
-    if p < 2:
+    """Deterministically compute Lucas-Lehmer residue for small exponents (p <= 61)."""
+    if type(p) is not int or not 2 <= p <= MAX_VERIFIED_EXPONENT or type(claimed_residue) is not int:
         return False, None
     if p == 2:
         return (claimed_residue == 0), 0
@@ -27693,10 +27711,12 @@ def init_schema(db):
 
 
 def reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time=None):
+    """Reconcile task state machine from the blockchain tables."""
     init_schema(db)
     if current_time is None:
         current_time = int(time.time())
 
+    # 1. Settled tasks from completed_compute_tasks
     completed_rows = db.execute(
         "SELECT problem_id, proof_tx_hash FROM completed_compute_tasks WHERE engine_id=?",
         (engine_id,)
@@ -27714,6 +27734,7 @@ def reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_tim
         except (ValueError, TypeError):
             continue
 
+    # 2. Verified / pending confirmation tasks from pending_proofs
     pending_rows = db.execute(
         "SELECT p.problem_id, p.proof_tx_hash FROM pending_proofs p "
         "JOIN transactions t ON t.hash=p.proof_tx_hash "
@@ -27735,6 +27756,7 @@ def reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_tim
         except (ValueError, TypeError):
             continue
 
+    # 3. Submitted unconfirmed transactions in mempool
     mempool_rows = db.execute(
         "SELECT hash, json_extract(data, '$.problem_id') FROM transactions "
         "WHERE type='submit_math_proof' AND block_height IS NULL AND json_extract(data, '$.engine_id')=?",
@@ -27755,6 +27777,7 @@ def reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_tim
         except (ValueError, TypeError):
             continue
 
+    # 4. Failed/challenged tasks
     failed_rows = db.execute(
         "SELECT c.target_proof_tx_hash, json_extract(t.data, '$.problem_id') "
         "FROM challenges c JOIN transactions t ON t.hash=c.target_proof_tx_hash "
@@ -27765,8 +27788,8 @@ def reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_tim
         try:
             exp = int(row[1])
             if start_exp <= exp <= end_exp:
-                cur = db.execute("SELECT state FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
-                if not cur or cur[0] != 'settled':
+                cur = db.execute("SELECT state,proof_tx_hash FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
+                if not cur or (cur[0] != 'settled' and cur[1] == row[0]):
                     db.execute(
                         "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
                         "VALUES (?, ?, ?, 'failed', ?) "
@@ -27776,6 +27799,7 @@ def reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_tim
         except (ValueError, TypeError):
             continue
 
+    # 5. Expired assignments -> transition to retry
     db.execute(
         "UPDATE gimps_tasks SET state='retry' "
         "WHERE engine_id=? AND state='assigned' AND lease_timeout IS NOT NULL AND lease_timeout <= ?",
@@ -27784,13 +27808,14 @@ def reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_tim
 
 
 def generate_next_gimps_task(db, engine_id, set_id, metadata, current_time=None):
+    """Deterministic, state-machine driven task generator for GIMPS problem sets."""
     if isinstance(metadata, str):
         try:
             metadata = json.loads(metadata)
         except Exception:
             return None
-    start_exp = int(metadata.get('start_exponent', 0))
-    end_exp = int(metadata.get('end_exponent', 0))
+    start_exp = integer(metadata.get('start_exponent', 0), 2, MAX_VERIFIED_EXPONENT)
+    end_exp = integer(metadata.get('end_exponent', 0), start_exp, MAX_VERIFIED_EXPONENT)
     if start_exp <= 0 or end_exp < start_exp:
         return None
 
@@ -27799,24 +27824,28 @@ def generate_next_gimps_task(db, engine_id, set_id, metadata, current_time=None)
 
     reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time)
 
+    # Find the next available exponent in [start_exp, end_exp]
     for p in range(start_exp, end_exp + 1):
         row = db.execute(
             "SELECT state, lease_timeout FROM gimps_tasks WHERE engine_id=? AND exponent=?",
             (engine_id, p)
         ).fetchone()
 
+        # Check if already completed or active
         if row:
             st = row[0]
             if st in ('settled', 'verified', 'submitted'):
                 continue
             if st == 'assigned' and row[1] and row[1] > current_time:
+                # Active lease held by worker
                 continue
 
+        # Found available exponent p (either unassigned, retry, failed, or expired)
         timeout = current_time + DEFAULT_LEASE_SECONDS
         db.execute(
             "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, assigned_at, lease_timeout) "
             "VALUES (?, ?, ?, 'assigned', ?, ?) "
-            "ON CONFLICT(engine_id, exponent) DO UPDATE SET state='assigned', assigned_at=excluded.assigned_at, lease_timeout=excluded.lease_timeout",
+            "ON CONFLICT(engine_id, exponent) DO UPDATE SET state='assigned', assigned_at=excluded.assigned_at, lease_timeout=excluded.lease_timeout, proof_tx_hash=NULL",
             (engine_id, set_id, p, current_time, timeout)
         )
         return f"{p}|{p}"
@@ -27825,12 +27854,14 @@ def generate_next_gimps_task(db, engine_id, set_id, metadata, current_time=None)
 
 
 def validate_gimps_proof(db, network, payload, sender, height, accepted_tx=None):
+    """Validate GIMPS proof format, mathematical bounds, and duplicate rules."""
     require(isinstance(payload, dict), 'payload dictionary required')
     engine_id = payload.get('engine_id')
     problem_id = payload.get('problem_id')
     proof_data = payload.get('proof_data', {})
     require(engine_id and problem_id is not None, 'engine_id and problem_id required')
 
+    # Verify engine is registered and active
     row = db.execute(
         "SELECT pkg_id, is_active, reward_weight FROM compute_engines WHERE engine_id=?",
         (engine_id,)
@@ -27839,12 +27870,20 @@ def validate_gimps_proof(db, network, payload, sender, height, accepted_tx=None)
     require(row[0] == PACKAGE, 'engine package must be corium/built-in-gimps')
     weight = row[2] if len(row) > 2 and row[2] is not None else 100
 
-    try:
-        p = int(problem_id)
-        require(p >= 3, 'Mersenne exponent must be >= 3')
-    except (ValueError, TypeError):
-        raise ValueError('problem_id must be integer exponent')
+    integer(weight, 0, MAX_INTEGER // 100)
+    integer(height, 0, MAX_INTEGER)
+    require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,3}', problem_id), 'canonical exponent string required')
+    p = integer(int(problem_id), 2, MAX_VERIFIED_EXPONENT)
+    active = db.execute('SELECT metadata FROM problem_sets WHERE engine_id=? AND activation_height<=?', (engine_id,height)).fetchall()
+    assigned_range = False
+    for item in active:
+        meta = json.loads(item[0])
+        start, end = meta.get('start_exponent'), meta.get('end_exponent')
+        if type(start) is int and type(end) is int and 2 <= start <= p <= end <= MAX_VERIFIED_EXPONENT:
+            assigned_range = True
+    require(assigned_range, 'exponent must belong to an active bounded problem set')
 
+    # Duplicate submission / Double redeem check
     completed = db.execute(
         "SELECT proof_tx_hash FROM completed_compute_tasks WHERE engine_id=? AND problem_id=?",
         (engine_id, str(p))
@@ -27860,26 +27899,25 @@ def validate_gimps_proof(db, network, payload, sender, height, accepted_tx=None)
         if accepted_tx is None or r[0] != accepted_tx:
             raise ValueError(f'exponent {p} already settled or pending confirmation')
 
-    require(isinstance(proof_data, dict), 'proof_data must be dictionary')
-    if proof_data.get('schema') == SCHEMA:
-        exact(proof_data, {'schema', 'exponent', 'method', 'residue', 'is_prime', 'iterations'})
-        require(proof_data['exponent'] == p, 'proof exponent mismatch')
-        require(proof_data['method'] in ('lucas-lehmer', 'p-minus-one', 'trial-factoring'), 'supported method')
-        residue = proof_data['residue']
-        require(isinstance(residue, int) and residue >= 0, 'non-negative integer residue required')
-        require(isinstance(proof_data['is_prime'], bool), 'boolean is_prime required')
-        require(proof_data['iterations'] == p - 2, 'exact Lucas-Lehmer iterations required')
-
-        if p <= 61 and proof_data['method'] == 'lucas-lehmer':
-            valid, expected = lucas_lehmer_verify(p, residue)
-            require(valid, f'invalid Lucas-Lehmer residue for p={p}: expected {expected}, got {residue}')
-            require(proof_data['is_prime'] == (expected == 0), 'is_prime must match residue zero check')
+    # Only fully recomputed Lucas-Lehmer results may receive native credit.
+    require(type(proof_data) is dict, 'proof_data must be dictionary')
+    versioned = 'schema' in proof_data
+    if versioned:
+        exact(proof_data, {'schema','exponent','method','residue','is_prime','iterations'})
+        require(proof_data['schema'] == SCHEMA, 'supported proof schema required')
+        require(type(proof_data['exponent']) is int and proof_data['exponent'] == p, 'proof exponent mismatch')
+        require(proof_data['method'] == 'lucas-lehmer', 'unimplemented proof method rejected')
+        require(type(proof_data['iterations']) is int and proof_data['iterations'] == p - 2, 'exact iteration count required')
+        require(type(proof_data['is_prime']) is bool, 'boolean primality claim required')
     else:
-        if 'residue' in proof_data and isinstance(proof_data['residue'], int):
-            residue = proof_data['residue']
-            if p <= 61 and residue != 0:
-                valid, expected = lucas_lehmer_verify(p, residue)
-                require(valid or residue == 0, 'invalid legacy residue')
+        exact(proof_data, {'residue'})
+    residue = proof_data['residue']
+    require(type(residue) is int and 0 <= residue < (1 << p)-1, 'bounded integer residue required')
+    valid, expected = lucas_lehmer_verify(p, residue)
+    require(valid, 'invalid Lucas-Lehmer residue')
+    prime_exponent = all(p % divisor for divisor in range(2, int(p**0.5)+1))
+    if versioned:
+        require(proof_data['is_prime'] == (prime_exponent and expected == 0), 'primality claim mismatch')
 
     return {
         'status': 'valid',
@@ -27893,6 +27931,7 @@ def validate_gimps_proof(db, network, payload, sender, height, accepted_tx=None)
 
 
 def settle(db, network, tx, height):
+    """Settle an unchallenged confirmed GIMPS proof, crediting contribution scores."""
     row = db.execute(
         "SELECT data, public_key, block_height FROM transactions "
         "WHERE hash=? AND type='submit_math_proof' AND block_height IS NOT NULL",
@@ -27907,6 +27946,7 @@ def settle(db, network, tx, height):
     problem_id = val['problem_id']
     reward = val['reward']
 
+    # Check if already redeemed
     done = db.execute(
         "SELECT proof_tx_hash FROM completed_compute_tasks WHERE engine_id=? AND problem_id=?",
         (engine_id, problem_id)
@@ -27915,6 +27955,7 @@ def settle(db, network, tx, height):
         require(done[0] == tx, 'bounty already redeemed')
         return val | {'duplicate': True}
 
+    # Verify pending state and 10-block challenge window
     pending = db.execute(
         "SELECT problem_id, proof_tx_hash, proposer_id, proposed_result, confirmation_deadline_height FROM pending_proofs WHERE proof_tx_hash=?",
         (tx,)
@@ -27926,11 +27967,13 @@ def settle(db, network, tx, height):
     require(p_proposer == sender and p_prob == problem_id, 'matching pending proof required')
     require(p_deadline == row[2] + 10 and height >= p_deadline, 'native challenge window must elapse')
 
+    # Check no active unrejected challenge
     require(db.execute(
         "SELECT 1 FROM challenges WHERE target_proof_tx_hash=? AND status!='rejected'",
         (tx,)
     ).fetchone() is None, 'challenged proof cannot settle on unchallenged path')
 
+    # Update contribution_scores
     prior = db.execute("SELECT score FROM contribution_scores WHERE user_id=?", (sender,)).fetchone()
     score = prior[0] if prior else 0
     integer(score, -MAX_INTEGER - 1, MAX_INTEGER - reward)
@@ -27946,6 +27989,7 @@ def settle(db, network, tx, height):
     )
     db.execute("DELETE FROM pending_proofs WHERE proof_tx_hash=?", (tx,))
 
+    # Update gimps_tasks state machine to settled
     try:
         p = int(problem_id)
         db.execute(
@@ -27963,6 +28007,9 @@ def settle(db, network, tx, height):
 
 
 def validate_challenge(db, network, target_tx):
+    """Validate challenge against a GIMPS proof.
+    Returns 1 if proof is valid (challenge fails), 0 if proof is invalid (challenge succeeds).
+    """
     row = db.execute(
         "SELECT data, public_key, block_height FROM transactions WHERE hash=? AND type='submit_math_proof'",
         (target_tx,)
@@ -27981,9 +28028,10 @@ def validate_challenge(db, network, target_tx):
 def main(args):
     action = args[0]
     database = args[1]
-    with sqlite3.connect(database) as db:
+    with closing(sqlite3.connect(database)) as db, db:
         db.row_factory = sqlite3.Row
         if action == 'next-task':
+            db.execute('BEGIN IMMEDIATE')
             engine_id, set_id, metadata = args[2:5]
             res = generate_next_gimps_task(db, engine_id, set_id, metadata)
             if res:
@@ -28005,16 +28053,16 @@ def main(args):
             network, target_tx = args[2:4]
             code = validate_challenge(db, network, target_tx)
             print(code)
-            sys.exit(0)
+            if code == 0:
+                sys.exit(0)  # Challenge succeeded
+            else:
+                sys.exit(0)  # Output is 1 or 0
         else:
             raise ValueError(f"unknown gimps action: {action}")
 
 
 if __name__ == '__main__':
-    try:
-        main(sys.argv[1:])
-    except Exception:
-        sys.exit(2)
+    main(sys.argv[1:])
 PY_CORIUM_GIMPS_CONSENSUS
 )
 
@@ -39378,8 +39426,11 @@ corix_strata_execute() {
             dcpm --root "$strata_path" "$@"
             return $?
         elif [[ "$1" == "dcpm "* ]] || [[ "$strata_command" =~ ^dcpm[[:space:]] ]] || [ "$strata_command" = "dcpm" ]; then
-            local _dcpm_args="${strata_command#dcpm}"
-            eval "dcpm --root \"$strata_path\" $_dcpm_args"
+            local -a _dcpm_args=()
+            local _dcpm_parsed
+            _dcpm_parsed=$("${PYTHON_CMD:-python3}" -c 'import json,shlex,sys; print(json.dumps(shlex.split(sys.argv[1])))' "$strata_command") || return 1
+            mapfile -t _dcpm_args < <(printf '%s' "$_dcpm_parsed" | jq -r '.[]')
+            dcpm --root "$strata_path" "${_dcpm_args[@]:1}"
             return $?
         fi
     fi
@@ -42294,7 +42345,7 @@ _resolve_proofs_and_challenges_at_height() {
 
     # ... (unchallenged proofs confirmation logic) ...
     db_query_safe "$BLOCKCHAIN_DB" \
-        "SELECT P.proposer_id, P.proof_tx_hash, P.problem_id FROM pending_proofs AS P LEFT JOIN challenges AS C ON P.proof_tx_hash = C.target_proof_tx_hash WHERE P.confirmation_deadline_height = %d AND C.challenge_tx_hash IS NULL AND NOT EXISTS(SELECT 1 FROM transactions T JOIN compute_engines E ON E.engine_id=json_extract(T.data,'$.engine_id') WHERE T.hash=P.proof_tx_hash AND E.pkg_id='compute/openci-attested:1');" \
+        "SELECT P.proposer_id, P.proof_tx_hash, P.problem_id FROM pending_proofs AS P LEFT JOIN challenges AS C ON P.proof_tx_hash = C.target_proof_tx_hash WHERE P.confirmation_deadline_height = %d AND C.challenge_tx_hash IS NULL AND NOT EXISTS(SELECT 1 FROM transactions T JOIN compute_engines E ON E.engine_id=json_extract(T.data,'$.engine_id') WHERE T.hash=P.proof_tx_hash AND E.pkg_id IN ('compute/openci-attested:1','corium/built-in-gimps'));" \
         "$current_height" | while IFS='|' read -r proposer_id proof_tx_hash problem_id; do
         
         msg "[PoM] 证明 ${proof_tx_hash:0:12} 已通过挑战期并被确认！ / [PoM] Proof ${proof_tx_hash:0:12} passed challenge window and is confirmed!"
@@ -42424,6 +42475,11 @@ _resolve_proofs_and_challenges_at_height() {
              db_execute_safe "$BLOCKCHAIN_DB" "UPDATE challenges SET status = 'rejected' WHERE challenge_tx_hash = %s;" "$challenge_tx"
         fi
     done || return 1
+    local gimps_due_tx
+    while IFS= read -r gimps_due_tx; do
+        [ -n "$gimps_due_tx" ] || continue
+        _corium_gimps_consensus settle "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$gimps_due_tx" "$current_height" >/dev/null || return 1
+    done < <(db_query_safe "$BLOCKCHAIN_DB" "SELECT P.proof_tx_hash FROM pending_proofs P JOIN transactions T ON T.hash=P.proof_tx_hash JOIN compute_engines E ON E.engine_id=json_extract(T.data,'$.engine_id') WHERE E.pkg_id='corium/built-in-gimps' AND P.confirmation_deadline_height<=%d AND NOT EXISTS(SELECT 1 FROM challenges C WHERE C.target_proof_tx_hash=P.proof_tx_hash AND C.status!='rejected') ORDER BY P.proof_tx_hash;" "$current_height")
     # Only this versioned engine uses bounded quorum settlement. Ordinary engines
     # retain their native dispute rules. Rejected challenges cannot starve payout.
     local openci_due_tx
