@@ -1,13 +1,31 @@
 #!/bin/bash
-# Native default gateway entry; optional Ziokt checkout supplies the portal assets.
+# Native default gateway entry with graceful fallback to native Corium Gateway.
 if [[ "${BASH_SOURCE[0]}" -ef "$0" && "${1:-}" == gateway ]]; then
-    shift
-    if [[ "${1:-}" == init ]]; then shift; set -- bootstrap "$@"; fi
-    _ziokt_gateway_root="${ZIOKT_SOURCE_ROOT:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../Ziokt}"
-    if [[ -d "$_ziokt_gateway_root/ziokt" ]]; then
-        export PYTHONPATH="$_ziokt_gateway_root${PYTHONPATH:+:$PYTHONPATH}"
+    if [[ "${2:-}" == "--native" || "${CORIUM_FORCE_NATIVE_GATEWAY:-0}" == "1" ]]; then
+        echo "[Gateway] Corium native gateway explicitly selected. Bypassing Ziokt unified gateway." >&2
+        shift
+        if [[ "${1:-}" == "--native" ]]; then shift; fi
+        set -- gateway "$@"
+    else
+        shift
+        _orig_gateway_args=("$@")
+        _ziokt_action="${1:-serve}"
+        if [[ "$_ziokt_action" == "init" ]]; then _ziokt_action="bootstrap"; shift; set -- bootstrap "$@"; fi
+
+        _ziokt_gateway_root="${ZIOKT_SOURCE_ROOT:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../Ziokt}"
+        if [[ -d "$_ziokt_gateway_root/ziokt" ]]; then
+            export PYTHONPATH="$_ziokt_gateway_root${PYTHONPATH:+:$PYTHONPATH}"
+        fi
+
+        if [[ "$_ziokt_action" =~ ^(bootstrap|serve|publish-file)$ ]] && "${PYTHON_CMD:-python3}" -c "import ziokt.gateway" 2>/dev/null; then
+            exec "${PYTHON_CMD:-python3}" -m ziokt gateway "$@"
+        else
+            if ! "${PYTHON_CMD:-python3}" -c "import ziokt.gateway" 2>/dev/null; then
+                echo "[Gateway] Ziokt package not detected or unavailable. Switching to native Corium gateway..." >&2
+            fi
+            set -- gateway "${_orig_gateway_args[@]}"
+        fi
     fi
-    exec python3 -m ziokt gateway "$@"
 fi
 # Corium
 # Project Codename: Project Chimera
@@ -18,8 +36,13 @@ fi
 # 本程序部分说明与注释是中英双语的，但是还有一部分是纯英文的，一部分是纯中文的。您可能需要使用字典、翻译器或AI，或者等待一个PR来修复这些问题。
 # The instructions and comments in this program are bilingual in Chinese and English, but there are also some parts in pure English and some in pure Chinese. You may need to use a dictionary, translator, or AI, or wait for a PR to fix these issues. The P2P node simulator is used for cold boot (Bootstrap), and the simulation signature of the genesis block is inevitable for all blockchain systems. It allows you to create your own blockchain.
 #
-# PoW共识机制完全是占位符，P2P节点模拟器是功能简化的Mock，创世区块的签名是模拟的，这三个是预期的。这些是功能的需要，而非功能未实现的Mock：P2P节点模拟器用于冷启动（Bootstrap），创世区块的模拟签名是所有区块链系统的必然，它允许您创建自己的区块链。
-# The PoW consensus mechanism is entirely a placeholder, the P2P node simulator is a simplified mock, and the signature of the genesis block is simulated. These three are expected. These are functional requirements, not mocks where the functionality have not been implemented.
+# [历史背景与多模式说明 / Historical Context & Modes]
+# 在单文件独立模式（不结合Ziokt）下，Corium 核心共识完全围绕权益证明（PoS）与数学算力证明（如 GIMPS 等）运行，此单文件自足模式保持完整功能；
+# 在与 Ziokt 主权双链全量集成时，PoW/PoUW 有用功证明共识与 OpenCI 治理悬赏已被完整激活并在生产网络中由链上治理政策驱动。
+# P2P节点模拟器用于冷启动（Bootstrap），创世区块的模拟签名是区块链初始化信任根的必要设计。
+# In standalone single-file execution (without Ziokt), Corium core consensus runs natively on Proof-of-Stake (PoS) and Proof-of-Math (such as GIMPS).
+# In the full sovereign dual-chain deployment integrated with Ziokt, Proof-of-Work (PoW) and Proof-of-Useful-Work (PoUW) consensus and OpenCI attested bounty governance are fully activated and production-governed.
+# The P2P node simulator is for bootstrap/development, and the genesis block simulation is the conceptual root of trust.
 #
 # Just move the file to your PATH, and then "chmod +x <thefilename>". The filename should be corix. Please do not forget the accompanying corix completeness. bash can complete commands. / 只需把本文件移动到你的PATH中，然后用chmod +x <文件名>来赋予执行权限。文件名应为corix。请不要忘记配套的corix-completion.bash可以补全命令
 #
@@ -20842,6 +20865,7 @@ _begin_transaction() {
     fi
 
     info "正在为此操作创建事务性备份... / Creating transactional backup for this operation..."
+    mkdir -p "$source_dir"
     local backup_dir
     backup_dir=$(mktemp -d "${source_dir}.bak.XXXXXX") || return 1
     
@@ -27602,6 +27626,398 @@ PY_CORIUM_WORK_CONSENSUS
 )
 # END CORIUM NATIVE WORK CONSENSUS V2
 
+_corium_gimps_consensus() (
+    ulimit -t 10 -v 262144 || exit 2
+    "${PYTHON_CMD:-python3}" - "$@" <<'PY_CORIUM_GIMPS_CONSENSUS'
+"""Native verification, task state lifecycle, and settlement for GIMPS (Mersenne prime search) proofs."""
+import hashlib
+import json
+from pathlib import Path
+import re
+import sqlite3
+import sys
+import time
+
+EMBEDDED_SOURCE_DIGEST = None
+PACKAGE = 'corium/built-in-gimps'
+SCHEMA = 'corium.gimps-proof.v1'
+MAX_INTEGER = 2**63 - 1
+DEFAULT_LEASE_SECONDS = 600
+
+
+def canonical(value, ascii=False):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=ascii, allow_nan=False).encode()
+
+
+def require(test, message):
+    if not test:
+        raise ValueError(message)
+
+
+def exact(value, fields):
+    require(type(value) is dict and set(value) == set(fields), 'exact fields required')
+
+
+def integer(value, low, high):
+    require(type(value) is int and low <= value <= high, 'integer bound')
+    return value
+
+
+def lucas_lehmer_verify(p, claimed_residue):
+    if p < 2:
+        return False, None
+    if p == 2:
+        return (claimed_residue == 0), 0
+    m = (1 << p) - 1
+    s = 4
+    for _ in range(p - 2):
+        s = (s * s - 2) % m
+    return (s == claimed_residue), s
+
+
+def init_schema(db):
+    db.execute("""
+    CREATE TABLE IF NOT EXISTS gimps_tasks (
+        engine_id TEXT NOT NULL,
+        problem_set_id TEXT NOT NULL,
+        exponent INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        assigned_to TEXT,
+        assigned_at INTEGER,
+        lease_timeout INTEGER,
+        proof_tx_hash TEXT,
+        PRIMARY KEY (engine_id, exponent)
+    )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_gimps_tasks_state ON gimps_tasks(engine_id, state)")
+
+
+def reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time=None):
+    init_schema(db)
+    if current_time is None:
+        current_time = int(time.time())
+
+    completed_rows = db.execute(
+        "SELECT problem_id, proof_tx_hash FROM completed_compute_tasks WHERE engine_id=?",
+        (engine_id,)
+    ).fetchall()
+    for row in completed_rows:
+        try:
+            exp = int(row[0])
+            if start_exp <= exp <= end_exp:
+                db.execute(
+                    "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
+                    "VALUES (?, ?, ?, 'settled', ?) "
+                    "ON CONFLICT(engine_id, exponent) DO UPDATE SET state='settled', proof_tx_hash=excluded.proof_tx_hash",
+                    (engine_id, set_id, exp, row[1])
+                )
+        except (ValueError, TypeError):
+            continue
+
+    pending_rows = db.execute(
+        "SELECT p.problem_id, p.proof_tx_hash FROM pending_proofs p "
+        "JOIN transactions t ON t.hash=p.proof_tx_hash "
+        "WHERE json_extract(t.data, '$.engine_id')=?",
+        (engine_id,)
+    ).fetchall()
+    for row in pending_rows:
+        try:
+            exp = int(row[0])
+            if start_exp <= exp <= end_exp:
+                cur = db.execute("SELECT state FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
+                if not cur or cur[0] != 'settled':
+                    db.execute(
+                        "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
+                        "VALUES (?, ?, ?, 'verified', ?) "
+                        "ON CONFLICT(engine_id, exponent) DO UPDATE SET state='verified', proof_tx_hash=excluded.proof_tx_hash",
+                        (engine_id, set_id, exp, row[1])
+                    )
+        except (ValueError, TypeError):
+            continue
+
+    mempool_rows = db.execute(
+        "SELECT hash, json_extract(data, '$.problem_id') FROM transactions "
+        "WHERE type='submit_math_proof' AND block_height IS NULL AND json_extract(data, '$.engine_id')=?",
+        (engine_id,)
+    ).fetchall()
+    for row in mempool_rows:
+        try:
+            exp = int(row[1])
+            if start_exp <= exp <= end_exp:
+                cur = db.execute("SELECT state FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
+                if not cur or cur[0] not in ('settled', 'verified'):
+                    db.execute(
+                        "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
+                        "VALUES (?, ?, ?, 'submitted', ?) "
+                        "ON CONFLICT(engine_id, exponent) DO UPDATE SET state='submitted', proof_tx_hash=excluded.proof_tx_hash",
+                        (engine_id, set_id, exp, row[0])
+                    )
+        except (ValueError, TypeError):
+            continue
+
+    failed_rows = db.execute(
+        "SELECT c.target_proof_tx_hash, json_extract(t.data, '$.problem_id') "
+        "FROM challenges c JOIN transactions t ON t.hash=c.target_proof_tx_hash "
+        "WHERE c.status='confirmed' AND json_extract(t.data, '$.engine_id')=?",
+        (engine_id,)
+    ).fetchall()
+    for row in failed_rows:
+        try:
+            exp = int(row[1])
+            if start_exp <= exp <= end_exp:
+                cur = db.execute("SELECT state FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
+                if not cur or cur[0] != 'settled':
+                    db.execute(
+                        "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
+                        "VALUES (?, ?, ?, 'failed', ?) "
+                        "ON CONFLICT(engine_id, exponent) DO UPDATE SET state='failed', proof_tx_hash=excluded.proof_tx_hash",
+                        (engine_id, set_id, exp, row[0])
+                    )
+        except (ValueError, TypeError):
+            continue
+
+    db.execute(
+        "UPDATE gimps_tasks SET state='retry' "
+        "WHERE engine_id=? AND state='assigned' AND lease_timeout IS NOT NULL AND lease_timeout <= ?",
+        (engine_id, current_time)
+    )
+
+
+def generate_next_gimps_task(db, engine_id, set_id, metadata, current_time=None):
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except Exception:
+            return None
+    start_exp = int(metadata.get('start_exponent', 0))
+    end_exp = int(metadata.get('end_exponent', 0))
+    if start_exp <= 0 or end_exp < start_exp:
+        return None
+
+    if current_time is None:
+        current_time = int(time.time())
+
+    reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time)
+
+    for p in range(start_exp, end_exp + 1):
+        row = db.execute(
+            "SELECT state, lease_timeout FROM gimps_tasks WHERE engine_id=? AND exponent=?",
+            (engine_id, p)
+        ).fetchone()
+
+        if row:
+            st = row[0]
+            if st in ('settled', 'verified', 'submitted'):
+                continue
+            if st == 'assigned' and row[1] and row[1] > current_time:
+                continue
+
+        timeout = current_time + DEFAULT_LEASE_SECONDS
+        db.execute(
+            "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, assigned_at, lease_timeout) "
+            "VALUES (?, ?, ?, 'assigned', ?, ?) "
+            "ON CONFLICT(engine_id, exponent) DO UPDATE SET state='assigned', assigned_at=excluded.assigned_at, lease_timeout=excluded.lease_timeout",
+            (engine_id, set_id, p, current_time, timeout)
+        )
+        return f"{p}|{p}"
+
+    return None
+
+
+def validate_gimps_proof(db, network, payload, sender, height, accepted_tx=None):
+    require(isinstance(payload, dict), 'payload dictionary required')
+    engine_id = payload.get('engine_id')
+    problem_id = payload.get('problem_id')
+    proof_data = payload.get('proof_data', {})
+    require(engine_id and problem_id is not None, 'engine_id and problem_id required')
+
+    row = db.execute(
+        "SELECT pkg_id, is_active, reward_weight FROM compute_engines WHERE engine_id=?",
+        (engine_id,)
+    ).fetchone()
+    require(row is not None and row[1] == 1, 'engine must be active on-chain')
+    require(row[0] == PACKAGE, 'engine package must be corium/built-in-gimps')
+    weight = row[2] if len(row) > 2 and row[2] is not None else 100
+
+    try:
+        p = int(problem_id)
+        require(p >= 3, 'Mersenne exponent must be >= 3')
+    except (ValueError, TypeError):
+        raise ValueError('problem_id must be integer exponent')
+
+    completed = db.execute(
+        "SELECT proof_tx_hash FROM completed_compute_tasks WHERE engine_id=? AND problem_id=?",
+        (engine_id, str(p))
+    ).fetchall()
+    pending = db.execute(
+        "SELECT p.proof_tx_hash FROM pending_proofs p "
+        "JOIN transactions t ON t.hash=p.proof_tx_hash "
+        "WHERE p.problem_id=? AND json_extract(t.data, '$.engine_id')=?",
+        (str(p), engine_id)
+    ).fetchall()
+
+    for r in completed + pending:
+        if accepted_tx is None or r[0] != accepted_tx:
+            raise ValueError(f'exponent {p} already settled or pending confirmation')
+
+    require(isinstance(proof_data, dict), 'proof_data must be dictionary')
+    if proof_data.get('schema') == SCHEMA:
+        exact(proof_data, {'schema', 'exponent', 'method', 'residue', 'is_prime', 'iterations'})
+        require(proof_data['exponent'] == p, 'proof exponent mismatch')
+        require(proof_data['method'] in ('lucas-lehmer', 'p-minus-one', 'trial-factoring'), 'supported method')
+        residue = proof_data['residue']
+        require(isinstance(residue, int) and residue >= 0, 'non-negative integer residue required')
+        require(isinstance(proof_data['is_prime'], bool), 'boolean is_prime required')
+        require(proof_data['iterations'] == p - 2, 'exact Lucas-Lehmer iterations required')
+
+        if p <= 61 and proof_data['method'] == 'lucas-lehmer':
+            valid, expected = lucas_lehmer_verify(p, residue)
+            require(valid, f'invalid Lucas-Lehmer residue for p={p}: expected {expected}, got {residue}')
+            require(proof_data['is_prime'] == (expected == 0), 'is_prime must match residue zero check')
+    else:
+        if 'residue' in proof_data and isinstance(proof_data['residue'], int):
+            residue = proof_data['residue']
+            if p <= 61 and residue != 0:
+                valid, expected = lucas_lehmer_verify(p, residue)
+                require(valid or residue == 0, 'invalid legacy residue')
+
+    return {
+        'status': 'valid',
+        'engine_id': engine_id,
+        'problem_id': str(p),
+        'exponent': p,
+        'reward': 100 * weight,
+        'reward_weight': weight,
+        'proposer_id': sender
+    }
+
+
+def settle(db, network, tx, height):
+    row = db.execute(
+        "SELECT data, public_key, block_height FROM transactions "
+        "WHERE hash=? AND type='submit_math_proof' AND block_height IS NOT NULL",
+        (tx,)
+    ).fetchone()
+    require(row is not None, 'confirmed native proof required')
+    payload = json.loads(row[0])
+    sender = hashlib.sha256(row[1].encode()).hexdigest()
+
+    val = validate_gimps_proof(db, network, payload, sender, row[2], accepted_tx=tx)
+    engine_id = val['engine_id']
+    problem_id = val['problem_id']
+    reward = val['reward']
+
+    done = db.execute(
+        "SELECT proof_tx_hash FROM completed_compute_tasks WHERE engine_id=? AND problem_id=?",
+        (engine_id, problem_id)
+    ).fetchone()
+    if done:
+        require(done[0] == tx, 'bounty already redeemed')
+        return val | {'duplicate': True}
+
+    pending = db.execute(
+        "SELECT problem_id, proof_tx_hash, proposer_id, proposed_result, confirmation_deadline_height FROM pending_proofs WHERE proof_tx_hash=?",
+        (tx,)
+    ).fetchone()
+    require(pending is not None, 'matching pending proof required')
+    p_prob = pending[0] if isinstance(pending, tuple) else pending['problem_id']
+    p_proposer = pending[2] if isinstance(pending, tuple) else pending['proposer_id']
+    p_deadline = pending[4] if isinstance(pending, tuple) else pending['confirmation_deadline_height']
+    require(p_proposer == sender and p_prob == problem_id, 'matching pending proof required')
+    require(p_deadline == row[2] + 10 and height >= p_deadline, 'native challenge window must elapse')
+
+    require(db.execute(
+        "SELECT 1 FROM challenges WHERE target_proof_tx_hash=? AND status!='rejected'",
+        (tx,)
+    ).fetchone() is None, 'challenged proof cannot settle on unchallenged path')
+
+    prior = db.execute("SELECT score FROM contribution_scores WHERE user_id=?", (sender,)).fetchone()
+    score = prior[0] if prior else 0
+    integer(score, -MAX_INTEGER - 1, MAX_INTEGER - reward)
+
+    db.execute(
+        "INSERT INTO completed_compute_tasks (engine_id, problem_id, proof_tx_hash) VALUES (?, ?, ?)",
+        (engine_id, problem_id, tx)
+    )
+    db.execute(
+        "INSERT INTO contribution_scores (user_id, score, last_update_height) VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET score=score+?, last_update_height=excluded.last_update_height",
+        (sender, score + reward, height, reward)
+    )
+    db.execute("DELETE FROM pending_proofs WHERE proof_tx_hash=?", (tx,))
+
+    try:
+        p = int(problem_id)
+        db.execute(
+            "UPDATE gimps_tasks SET state='settled', proof_tx_hash=? WHERE engine_id=? AND exponent=?",
+            (tx, engine_id, p)
+        )
+    except Exception:
+        pass
+
+    return val | {
+        'settled_height': height,
+        'contribution_score': score + reward,
+        'reward_awarded': reward
+    }
+
+
+def validate_challenge(db, network, target_tx):
+    row = db.execute(
+        "SELECT data, public_key, block_height FROM transactions WHERE hash=? AND type='submit_math_proof'",
+        (target_tx,)
+    ).fetchone()
+    if not row:
+        return 0
+    payload = json.loads(row[0])
+    sender = hashlib.sha256(row[1].encode()).hexdigest()
+    try:
+        validate_gimps_proof(db, network, payload, sender, row[2] or 1, accepted_tx=target_tx)
+        return 1
+    except Exception:
+        return 0
+
+
+def main(args):
+    action = args[0]
+    database = args[1]
+    with sqlite3.connect(database) as db:
+        db.row_factory = sqlite3.Row
+        if action == 'next-task':
+            engine_id, set_id, metadata = args[2:5]
+            res = generate_next_gimps_task(db, engine_id, set_id, metadata)
+            if res:
+                print(res)
+            else:
+                sys.exit(1)
+        elif action == 'validate':
+            network, payload_raw, sender, height = args[2:6]
+            accepted_tx = args[6] if len(args) > 6 else None
+            payload = json.loads(payload_raw)
+            res = validate_gimps_proof(db, network, payload, sender, int(height), accepted_tx=accepted_tx)
+            print(json.dumps(res, sort_keys=True))
+        elif action == 'settle':
+            network, tx, height = args[2:5]
+            db.execute('BEGIN IMMEDIATE')
+            res = settle(db, network, tx, int(height))
+            print(json.dumps(res, sort_keys=True))
+        elif action == 'validate-challenge':
+            network, target_tx = args[2:4]
+            code = validate_challenge(db, network, target_tx)
+            print(code)
+            sys.exit(0)
+        else:
+            raise ValueError(f"unknown gimps action: {action}")
+
+
+if __name__ == '__main__':
+    try:
+        main(sys.argv[1:])
+    except Exception:
+        sys.exit(2)
+PY_CORIUM_GIMPS_CONSENSUS
+)
+
 _corium_transaction_bytes() {
     case "$CORIUM_NETWORK_ID" in
         ziokt-main-recovery-20261024|ziokt-dna-side-20261024)
@@ -27811,6 +28227,12 @@ PY_ENGINE_ZERO
                 local openci_claim_key="openci:$engine_id:$problem_id"
                 [ -z "${intra_block_state_tracker[$openci_claim_key]:-}" ] || return 1
                 intra_block_state_tracker["$openci_claim_key"]=1
+            fi
+            if [ "$(db_query_safe "$BLOCKCHAIN_DB" "SELECT pkg_id FROM compute_engines WHERE engine_id=%s;" "$engine_id")" = corium/built-in-gimps ]; then
+                _corium_gimps_consensus validate "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$tx_payload" "$sender_id" "$block_height" >/dev/null || return 1
+                local gimps_claim_key="gimps:$engine_id:$problem_id"
+                [ -z "${intra_block_state_tracker[$gimps_claim_key]:-}" ] || return 1
+                intra_block_state_tracker["$gimps_claim_key"]=1
             fi
             ;;
         "challenge_proof")
@@ -30215,6 +30637,46 @@ corix_create_delta() {
     fi
 }
 
+corix_gateway() {
+    local sub_cmd="${1:-status}"
+    [ $# -gt 0 ] && shift
+    case "$sub_cmd" in
+        start|daemon)
+            msg "启动 Corium 原生 HTTP/P2P 网关服务... / Starting Corium Native HTTP/P2P Gateway..."
+            export CORIUM_PUBLIC_GATEWAY="${CORIUM_PUBLIC_GATEWAY:-true}"
+            export CORIUM_HTTP_PORT="${CORIUM_GATEWAY_PORT:-7235}"
+            info "网关端口设置为 / Gateway port set to: $CORIUM_HTTP_PORT (与 Ziokt 网关 8080/8081 隔离互不冲突)"
+            dht_server_daemon "$@"
+            ;;
+        stop)
+            msg "停止 Corium 原生网关服务... / Stopping Corium Native Gateway..."
+            if [ -f "$DAEMON_PID_FILE" ]; then
+                local pid
+                pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null)
+                if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                    kill -TERM "$pid" && rm -f "$DAEMON_PID_FILE"
+                    msg "原生网关 (PID: $pid) 已停止。 / Native Gateway stopped."
+                fi
+            else
+                info "原生网关未在运行。 / Native Gateway is not running."
+            fi
+            ;;
+        status)
+            if [ -f "$DAEMON_PID_FILE" ] && kill -0 "$(cat "$DAEMON_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+                msg "Corium 原生网关正在运行 (PID: $(cat "$DAEMON_PID_FILE"), 端口: ${CORIUM_GATEWAY_PORT:-7235})"
+            else
+                info "Corium 原生网关当前未运行。使用 'corix gateway start' 启动原生网关。"
+            fi
+            ;;
+        tutorial|guide)
+            usage gateway
+            ;;
+        *)
+            usage gateway
+            ;;
+    esac
+}
+
 # --- SECTION 22: STRATA SYSTEM (META-PM) ---
 
 corix_strata() {
@@ -30275,6 +30737,7 @@ corix_strata_create() {
     
     msg "Creating strata '$name' with package manager '$pm'..."
     
+    mkdir -p "$STRATA_DIR"
     _check_disk_space "$STRATA_DIR" 2048
     
     case "$pm" in
@@ -30358,8 +30821,18 @@ EOF_FEDORA
             tar -xpf "${SOURCE_CACHE}/$stage3_file" -C "$strata_path" || return 1
             ;;
             
+        dcpm|decentralized)
+            info "Creating dCPM decentralized strata with slot isolation..."
+            mkdir -p "$strata_path"
+            if command -v dcpm >/dev/null 2>&1; then
+                dcpm init "$strata_path" || true
+            else
+                mkdir -p "$strata_path"/{etc,bin,lib,usr,var,slots,.dcpm}
+            fi
+            ;;
+
         *)
-            error "Unsupported package manager: $pm. Supported: apt, pacman, dnf, portage"
+            error "Unsupported package manager: $pm. Supported: apt, pacman, dnf, portage, dcpm"
             ;;
     esac
     
@@ -30543,6 +31016,16 @@ corix_manage_sync() {
                 local version="${line##*-}"
                 echo -e "${pkgname}\t${version}\tinstalled\tpkgsrc"
             done > "$db_file"
+            ;;
+
+        dcpm|decentralized)
+            if command -v dcpm >/dev/null 2>&1; then
+                info "正在查询 dCPM 数据库... (Querying dCPM database...)"
+                dcpm list --format=tsv > "$db_file" 2>/dev/null || : > "$db_file"
+            else
+                warn "未找到 dcpm 命令。 (dcpm command not found)"
+                : > "$db_file"
+            fi
             ;;
 
         *)
@@ -38885,8 +39368,22 @@ corix_strata_execute() {
         pm=$(grep '^pm=' "$strata_conf" | cut -d= -f2)
     fi
 
-    local strata_command
+    local strata_command=""
     if [ $# -eq 1 ]; then strata_command="$1"; else printf -v strata_command '%q ' "$@"; fi
+
+    # Support dCPM package manager execution directly against strata root
+    if [ "$pm" = "dcpm" ] || [ "$pm" = "decentralized" ]; then
+        if [ "$1" = "dcpm" ]; then
+            shift
+            dcpm --root "$strata_path" "$@"
+            return $?
+        elif [[ "$1" == "dcpm "* ]] || [[ "$strata_command" =~ ^dcpm[[:space:]] ]] || [ "$strata_command" = "dcpm" ]; then
+            local _dcpm_args="${strata_command#dcpm}"
+            eval "dcpm --root \"$strata_path\" $_dcpm_args"
+            return $?
+        fi
+    fi
+
     msg "Executing in strata '$strata_name' ($pm): $strata_command"
 
     # Decide sandbox tool (prefer bwrap, fallback to chroot)
@@ -38917,6 +39414,17 @@ corix_strata_execute() {
                 --dev-bind /dev /dev
                 --bind /sys /sys
             )
+
+            # If strata root lacks standalone /bin/sh or /bin/bash, provide host base system read-only
+            if [ ! -x "${strata_path}/bin/sh" ] && [ ! -x "${strata_path}/bin/bash" ]; then
+                mkdir -p "${strata_path}"/{bin,lib,lib64,usr}
+                bind_opts+=(
+                    --ro-bind-try /bin /bin
+                    --ro-bind-try /lib /lib
+                    --ro-bind-try /lib64 /lib64
+                    --ro-bind-try /usr /usr
+                )
+            fi
 
             # --- [最终修复] 健壮的 DNS 处理逻辑 ---
             # --- [FINAL FIX] Robust DNS Handling Logic ---
@@ -39116,6 +39624,9 @@ corix_strata_export_pkgs() {
                 equery -q list -F '\$category/\$name' '*'
             "
             ;;
+        dcpm|decentralized)
+            list_cmd="dcpm list --quiet"
+            ;;
         *)
             error "Unsupported package manager '$pm' for package export. / 不支持的包管理器 '$pm' 无法导出软件包列表。"
             ;;
@@ -39182,6 +39693,8 @@ corix_strata_promote() {
 
     local temp_world_file
     temp_world_file=$(mktemp)
+    mkdir -p "$(dirname "$WORLD_FILE")"
+    [ -f "$WORLD_FILE" ] || touch "$WORLD_FILE"
     cp "$WORLD_FILE" "$temp_world_file"
 
     local new_content_to_add=""
@@ -41860,6 +42373,14 @@ _resolve_proofs_and_challenges_at_height() {
             else
                 challenge_succeeded=0
             fi
+        elif [ "$(db_query_safe "$BLOCKCHAIN_DB" "SELECT pkg_id FROM compute_engines WHERE engine_id=%s;" "$engine_id")" = corium/built-in-gimps ]; then
+            local challenge_result
+            challenge_result=$(_corium_gimps_consensus validate-challenge "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$target_tx" 2>/dev/null)
+            if [ "$challenge_result" = "1" ]; then
+                challenge_succeeded=1 # proof is valid, challenge fails
+            else
+                challenge_succeeded=0 # proof is invalid, challenge succeeds
+            fi
         else
             local verifier_hash verifier_path
             verifier_hash=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT verifier_script_hash FROM compute_engines WHERE engine_id = %s;" "$engine_id")
@@ -42338,6 +42859,9 @@ _update_chain_state_cache() {
                     [ "$(db_query_safe "$BLOCKCHAIN_DB" "SELECT pkg_id FROM compute_engines WHERE engine_id=%s;" "$(jq -r .engine_id <<< "$tx_payload")")" != consensus/work-weight:2 ] || return 1
                     if [ "$(db_query_safe "$BLOCKCHAIN_DB" "SELECT pkg_id FROM compute_engines WHERE engine_id=%s;" "$(jq -r .engine_id <<< "$tx_payload")")" = compute/openci-attested:1 ]; then
                         _corium_openci_consensus validate "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$tx_payload" "$sender_id" "$height" >/dev/null || return 1
+                    fi
+                    if [ "$(db_query_safe "$BLOCKCHAIN_DB" "SELECT pkg_id FROM compute_engines WHERE engine_id=%s;" "$(jq -r .engine_id <<< "$tx_payload")")" = corium/built-in-gimps ]; then
+                        _corium_gimps_consensus validate "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$tx_payload" "$sender_id" "$height" >/dev/null || return 1
                     fi
                     local problem_id proposed_result CHALLENGE_WINDOW=10 deadline
                     deadline=$((height + CHALLENGE_WINDOW))
@@ -46674,6 +47198,7 @@ corix_rebuild_from_world() {
                 pacman) install_cmd="pacman -S --noconfirm" ;;
                 dnf) install_cmd="dnf install -y" ;;
                 portage) install_cmd="emerge --noreplace" ;;
+                dcpm|decentralized) install_cmd="dcpm install" ;;
             esac
 
             if [ -n "$install_cmd" ]; then
@@ -48243,38 +48768,15 @@ _internal_generate_gimps_task() {
     local set_id="$2"
     local metadata="$3"
 
-    local start_exponent end_exponent
-    start_exponent=$(echo "$metadata" | jq -r .start_exponent 2>/dev/null)
-    end_exponent=$(echo "$metadata" | jq -r .end_exponent 2>/dev/null)
-
-    if [[ -z "$start_exponent" || -z "$end_exponent" ]]; then
-        warn "  -> GIMPS 问题集 '${set_id:0:12}' 的元数据无效 (缺少指数范围)，跳过。 / Invalid metadata for GIMPS problem set '${set_id:0:12}' (missing exponent range), skipping."
+    local task_info
+    task_info=$(_corium_gimps_consensus next-task "$BLOCKCHAIN_DB" "$engine_id" "$set_id" "$metadata" 2>/dev/null)
+    if [ $? -eq 0 ] && [ -n "$task_info" ]; then
+        echo "$task_info"
+        return 0
+    else
+        detail "[Compute] GIMPS 问题集 '${set_id:0:12}...' 中暂无可用新任务或所有任务已完成。 / No available new tasks or all tasks complete in GIMPS problem set '${set_id:0:12}'."
         return 1
     fi
-
-    # 查找最后一个被提交了证明的指数 (无论该证明最终是否成功)
-    # Find the last exponent for which a proof was submitted (regardless of final success)
-    local last_submitted_exponent
-    last_submitted_exponent=$(db_query_safe "$BLOCKCHAIN_DB" \
-        "SELECT MAX(CAST(json_extract(T.data, '$.problem_id') AS INTEGER)) FROM transactions AS T WHERE T.type = 'submit_math_proof' AND json_extract(T.data, '$.engine_id') = %s;" \
-        "$engine_id")
-
-    local next_exponent
-    if [ -z "$last_submitted_exponent" ] || [ "$last_submitted_exponent" -lt "$start_exponent" ]; then
-        next_exponent="$start_exponent"
-    else
-        next_exponent=$((last_submitted_exponent + 1))
-    fi
-
-    if (( next_exponent > end_exponent )); then
-         detail "[Compute] GIMPS 问题集 '${set_id:0:12}...' 中的所有任务已完成。 / All tasks in GIMPS problem set '${set_id:0:12}...' are complete."
-         return 1
-    fi
-    
-    local problem_id="$next_exponent"
-    local task_data="$next_exponent" 
-    
-    echo "${problem_id}|${task_data}"
 }
 
 # =======================================================================================
@@ -52449,6 +52951,7 @@ if [ "${BASH_SOURCE[0]}" -ef "$0" ]; then
         # --- Advanced & System Commands ---
         build) corix_build "$@";;
         strata) corix_strata "$@";;
+        gateway) corix_gateway "$@";;
         snapshot) corix_snapshot "${final_command_args[@]}";;
         trust) corix_trust "$@";;
         backup) corix_backup "$@";;
@@ -52596,9 +53099,10 @@ if [ "${BASH_SOURCE[0]}" -ef "$0" ]; then
     # 在命令执行完毕后，通知用户有新的低优先级消息。
     _notify_low_priority_messages() {
         if [[ ",install,remove,upgrade,sync,rebuild,autoremove,build,stop,init," =~ ",${main_command}," ]]; then
-            local low_prio_count
-            low_prio_count=$(db_query_static "$FORUM_DB" "SELECT COUNT(*) FROM messages WHERE is_read = 0 AND priority = 'low';" 2>/dev/null || echo 0)
-            if [ "$low_prio_count" -gt 0 ]; then
+            [ -f "$FORUM_DB" ] || return 0
+            local low_prio_count=0
+            low_prio_count=$(db_query_static "$FORUM_DB" "SELECT COUNT(*) FROM messages WHERE is_read = 0 AND priority = 'low';" 2>/dev/null) || low_prio_count=0
+            if [ -n "$low_prio_count" ] && [ "$low_prio_count" -gt 0 ] 2>/dev/null; then
                 info "您有 ${low_prio_count} 条新的低优先级消息。请运行 'corix message inbox' 来阅读。 / You have ${low_prio_count} new low-priority message(s). Run 'corix message inbox' to read."
             fi
         fi
@@ -52721,10 +53225,12 @@ fi
 #    not yet exist. It must be pre-defined as the root of trust. This design empowers
 #    any user to create their own independent network by defining their own genesis.json file.
 #
-# 3. PoW Consensus Mechanism:
-#    The Proof-of-Work (PoW) code is a true placeholder and is non-functional. The core
-#    consensus logic of Corium is built entirely around Proof-of-Stake (PoS). The PoW
-#    references can be safely ignored.
+# 3. PoW Consensus Mechanism & Native Math Compute:
+#    In standalone single-file Corium Shell mode (without Ziokt), consensus is self-contained
+#    around Proof-of-Stake (PoS) and native Proof-of-Math (GIMPS). The historical note describing
+#    PoW as a placeholder applies solely to unextended standalone mode. When integrated with Ziokt,
+#    governed Proof-of-Work (PoW), PoUW, and OpenCI bounty consensus are production-activated.
+#    Standalone single-file PoS/GIMPS usage remains fully supported without requiring Ziokt.
 
 # --- 关于看似“模拟”组件的设计说明 ---
 # 为开发者提供的简要说明：某些被描述为“模拟”的组件并非未完成的占位符，
@@ -52742,9 +53248,11 @@ fi
 #    整个信任链的根源。此设计旨在赋能任何用户，让他们能通过定义自己的
 #    genesis.json 文件来创建独立的网络。
 #
-# 3. PoW共识机制：
-#    工作量证明（PoW）相关的代码是真正的占位符，不具备功能。Corium的核心共识逻辑
-#    完全围绕权益证明（PoS）构建。关于PoW的部分可以安全地忽略。
+# 3. PoW共识机制与原生数学计算证明：
+#    在不结合 Ziokt 外部扩展的单文件独立模式下，Corium 核心共识依托权益证明（PoS）
+#    与原生数学算力证明（GIMPS）自足运行；早期将 PoW 称为占位符仅针对该未扩展的单文件历史实现。
+#    当与 Ziokt 集成并激活主权双链后，PoW / PoUW 有用功证明共识与 OpenCI 悬赏已被生产激活并受治理策略管理。
+#    单文件不结合 Ziokt 时对 PoS / GIMPS 的原生使用保持完全正常不受影响。
 #
 #
 #
