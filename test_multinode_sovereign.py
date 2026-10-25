@@ -315,6 +315,16 @@ class TestMultiNodeSovereignSurvival(unittest.TestCase):
         bad_pow_block = dict(res['block'])
         bad_pow_block['work'] = dict(bad_pow_block['work'])
         bad_pow_block['work']['nonce'] = (bad_pow_block['work']['nonce'] + 999999) % (2**64)
+        # Changing a nonce can accidentally find another valid low-difficulty
+        # proof. Select a demonstrably insufficient digest before testing admission.
+        target=self.core_b.get_expected_target(tip_b['height'],tip_b['hash'],tip_b['timestamp'])
+        context=self.core_b.work_context(bad_pow_block)
+        for _ in range(256):
+            candidate=self.core_b.calculate_work_digest(bad_pow_block['work']['policy'],context,bad_pow_block['work']['nonce'])
+            if int(candidate,16)>target:break
+            bad_pow_block['work']['nonce']=(bad_pow_block['work']['nonce']+1)%(2**64)
+        else:self.fail('could not construct an insufficient PoW test vector')
+        self.assertGreater(int(candidate,16),target)
         raw_bad = self.core_b.signing_bytes(bad_pow_block)
         bad_hash = hashes.Hash(hashes.SHA256())
         bad_hash.update(raw_bad)
