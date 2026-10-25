@@ -22665,6 +22665,7 @@ dht_find_chunk() {
 _dht_send_message_direct() {
     local target_node_id="$1"
     local message_type="$2"
+    [[ ",${CORIUM_EXCLUDED_NODES:-}," != *",${target_node_id},"* ]] || return 3
     local payload="$3"
     
     # --- [新增] P2P 不信任检查 (出站) - 完整实现 ---
@@ -24661,6 +24662,8 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
 
         if not all([msg_type, sender_id, signature_hex]):
             return {"status": "error", "message": "Malformed request"}
+        if sender_id in os.environ.get('CORIUM_EXCLUDED_NODES','').split(','):
+            return {"status":"error","message":"Node excluded by local policy"}
 
         sender_pubkey_str = data.get("public_key")
         if sender_pubkey_str is None: sender_pubkey_str = self.get_peer_pubkey(sender_id)
@@ -33332,6 +33335,11 @@ load_config() {
     P2P_SIMULATE_NODES="${CORIUM_CONFIG_CACHE[p2p_simulate_nodes]:-}"
     P2P_DHT_ALPHA="${CORIUM_CONFIG_CACHE[p2p_dht_alpha]:-}"
     AUTO_TRUST_NEW_NODES="${CORIUM_CONFIG_CACHE[p2p_auto_trust_new_nodes]:-}"
+    CORIUM_EXCLUDED_NODES="${CORIUM_CONFIG_CACHE[p2p_excluded_nodes]:-}"
+    CORIUM_EXCLUDED_NODES="${CORIUM_EXCLUDED_NODES// /}"
+    [[ ${#CORIUM_EXCLUDED_NODES} -le 4159 ]] || return 1
+    [[ -z "$CORIUM_EXCLUDED_NODES" || "$CORIUM_EXCLUDED_NODES" =~ ^[a-f0-9]{64}(,[a-f0-9]{64})*$ ]] || return 1
+    export CORIUM_EXCLUDED_NODES
     P2P_STUN_SERVERS="${CORIUM_CONFIG_CACHE[p2p_stun_servers]:-}"
     P2P_ENABLE_UPNP="${CORIUM_CONFIG_CACHE[p2p_enable_upnp]:-}"
     P2P_ENABLE_HOLE_PUNCHING="${CORIUM_CONFIG_CACHE[p2p_enable_hole_punching]:-}"

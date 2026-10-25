@@ -104,6 +104,12 @@ if __name__=='__main__':
 
 
 class ExplicitSeedConfigurationTests(unittest.TestCase):
+    def test_node_exclusion_blocks_before_opening_a_transport(self):
+        identity='a'*64
+        command='source "$1"\nCORIUM_EXCLUDED_NODES="$2"\ndht_send_message "$2" PING excluded\n'
+        result=subprocess.run(['bash','-c',command,'exclude-test',str(SOURCE),identity],capture_output=True,text=True,timeout=15)
+        self.assertEqual(result.returncode,3)
+
     def test_host_ipv4_ipv6_and_empty_seeds_reach_native_loader(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);config=root/'etc/corix/networks/default/corix.conf';config.parent.mkdir(parents=True)

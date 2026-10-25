@@ -179,6 +179,10 @@ class ReorgTests(Fixture):
         self.assertEqual(announce(payload),{'status':'success','data':'BLOCK_ACCEPTED'})
         self.assertEqual(self.tip(self.chain),tip);self.assert_replay();before=self.semantic()
         self.assertEqual(announce(payload),{'status':'success','data':'BLOCK_KNOWN'})
+        from unittest.mock import patch
+        with patch.dict(os.environ,{'CORIUM_EXCLUDED_NODES':self.peer_identity}):
+            self.assertEqual(announce(payload),{'status':'error','message':'Node excluded by local policy'})
+            self.assertEqual(self.semantic(),before)
         for body in (payload.rsplit('|',1)[0]+'|00',payload+'|extra',payload.replace('|2|','|3|'),payload.replace(self.peer_identity,'0'*64)):
             self.assertEqual(announce(body)['status'],'error');self.assertEqual(self.semantic(),before)
 
