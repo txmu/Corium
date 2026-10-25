@@ -156,3 +156,12 @@ class MainnetRecoveryHoldTests(unittest.TestCase):
             hold.chmod(0o600)
             self.assertTrue(start_permitted(hold))
 
+            # A signed declaration cannot bless a branch with a missing height,
+            # even if the remaining predecessor hashes were edited to join up.
+            import sqlite3
+            from contextlib import closing
+            with closing(sqlite3.connect(db)) as chain,chain:
+                chain.execute('DELETE FROM blocks WHERE height=55')
+                chain.execute("UPDATE blocks SET previous_hash='h54' WHERE height=56")
+            self.assertFalse(start_permitted(hold))
+

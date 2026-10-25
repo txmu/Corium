@@ -9,6 +9,7 @@ lean_version=$(lean --version)
 printf '%s\n' "$lean_version"
 [[ "$lean_version" =~ version\ 4\.19\.0, ]]
 python3 formal/theorem_inventory.py
+python3 formal/generate_guards.py --check
 
 echo "=== [2/4] Verifying Core and Sovereign Lean 4 Proof Modules ==="
 module_list=$(python3 formal/theorem_inventory.py --modules)

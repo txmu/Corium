@@ -36,6 +36,8 @@ def hashes():
                 raise ValueError(f'Missing source boundary: {name}')
             body = text[start.start():start.end() + end.end()]
             result[name] = hashlib.sha256(body.encode()).hexdigest()
+    for relative in ('consensus_hold.py','formal/contracts.json','formal/generate_guards.py'):
+        result['file:'+relative]=hashlib.sha256((ROOT/relative).read_bytes()).hexdigest()
     return result
 
 

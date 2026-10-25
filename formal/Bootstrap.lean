@@ -4,6 +4,15 @@ import Init
 verification, SQLite durability and P2P transport are external premises. -/
 namespace Corium.Bootstrap
 
+-- BEGIN GENERATED VERIFIED GUARDS
+abbrev hold_may_start (active : Bool) (requires_authorization : Bool) (authorized : Bool) : Prop :=
+  (¬ (active = true) ∧ (¬ (requires_authorization = true) ∨ (authorized = true)))
+
+abbrev block_linked (height : Nat) (digest : String) (next_height : Nat) (next_previous : String) : Prop :=
+  ((next_height = (height + 1)) ∧ (next_previous = digest))
+
+-- END GENERATED VERIFIED GUARDS
+
 structure State where
   historyVerified : Bool
   genesisTrusted : Bool
@@ -71,5 +80,24 @@ theorem foreign_genesis_rejected (genesis expectedGenesis identity seedIdentity 
     ¬ publicJoinAccepted genesis expectedGenesis identity seedIdentity := by
   intro h
   exact wrong h.1
+
+theorem actual_active_hold_rejects (required authorized : Bool) :
+    ¬ hold_may_start true required authorized := by
+  simp [hold_may_start]
+
+theorem actual_required_authorization_cannot_be_bypassed (active : Bool) :
+    ¬ hold_may_start active true false := by
+  simp [hold_may_start]
+
+theorem actual_link_rejects_height_gap (height nextHeight : Nat) (digest previous : String)
+    (gap : height + 1 < nextHeight) : ¬ block_linked height digest nextHeight previous := by
+  intro accepted
+  have consecutive := accepted.1
+  omega
+
+theorem actual_link_rejects_foreign_parent (height nextHeight : Nat) (digest previous : String)
+    (wrong : previous ≠ digest) : ¬ block_linked height digest nextHeight previous := by
+  intro accepted
+  exact wrong accepted.2
 
 end Corium.Bootstrap

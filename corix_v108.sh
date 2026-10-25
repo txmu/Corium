@@ -24741,7 +24741,8 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
             if not re.fullmatch(r'[1-9][0-9]{0,4}',port) or int(port)>65535:
                 return {"status":"error","message":"Invalid announced port"}
             # The envelope key was already bound to sender_id and its signature
-            # verified above. A second registry lookup rejects new unstaked peers.
+            # verified above. Announcers need no validator stake; the actual
+            # native branch verifier below decides block/transaction admission.
             public_key=sender_pubkey_str
             if not public_key or not verify_identity_signature('ANNOUNCE_BLOCK',os.environ.get('CORIUM_NETWORK_ID','default'),sender_id,(digest+'|'+height).encode(),signature,public_key):
                 return {"status":"error","message":"Invalid announcement signature"}

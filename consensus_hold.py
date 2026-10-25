@@ -11,6 +11,29 @@ import sqlite3
 import hashlib
 import re
 
+# BEGIN GENERATED VERIFIED GUARDS
+def _contract_argument(value, kind):
+    valid = (type(value) is int and value >= 0) if kind == "Nat" else type(value) is bool if kind == "Bool" else type(value) is str if kind == "String" else type(value) is list and all(type(item) is bool for item in value)
+    if not valid: raise ValueError("verified guard argument outside its proved domain: " + kind)
+
+
+def hold_may_start(active, requires_authorization, authorized):
+    _contract_argument(active, 'Bool')
+    _contract_argument(requires_authorization, 'Bool')
+    _contract_argument(authorized, 'Bool')
+    return (not active and (not requires_authorization or authorized))
+
+
+def block_linked(height, digest, next_height, next_previous):
+    _contract_argument(height, 'Nat')
+    _contract_argument(digest, 'String')
+    _contract_argument(next_height, 'Nat')
+    _contract_argument(next_previous, 'String')
+    return ((next_height == (height + 1)) and (next_previous == digest))
+
+
+# END GENERATED VERIFIED GUARDS
+
 try:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -109,10 +132,13 @@ def _verify_recovery_auth(auth, path_context=None):
         # Check chain continuity from 50 to 64
         cur.execute("SELECT height, hash, previous_hash FROM blocks WHERE height BETWEEN 50 AND 64 ORDER BY height")
         branch_rows = cur.fetchall()
+        if len(branch_rows)!=15:
+            conn.close()
+            return False
         for i in range(1, len(branch_rows)):
             prev_block = branch_rows[i - 1]
             curr_block = branch_rows[i]
-            if curr_block[2] != prev_block[1]:
+            if not block_linked(prev_block[0],prev_block[1],curr_block[0],curr_block[2]):
                 conn.close()
                 return False
 
@@ -149,17 +175,16 @@ def start_permitted(path):
     if not isinstance(value, dict) or value.get('schema') != 'ziokt.consensus-safety-hold.v1':
         return False
 
-    if value.get('active') is not False:
+    if type(value.get('active')) is not bool:
         return False
 
     # When active is False:
     # For ziokt-main or when authorized_recovery is provided, authorized_recovery MUST be verified.
-    if is_mainnet or 'authorized_recovery' in value:
-        if 'authorized_recovery' not in value:
-            return False
-        return _verify_recovery_auth(value['authorized_recovery'], path_context=p)
-
-    return True
+    requires_authorization=is_mainnet or 'authorized_recovery' in value
+    authorized=False
+    if not value['active'] and requires_authorization and 'authorized_recovery' in value:
+        authorized=_verify_recovery_auth(value['authorized_recovery'],path_context=p)
+    return hold_may_start(value['active'],requires_authorization,authorized)
 
 
 if __name__ == '__main__':

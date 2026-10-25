@@ -1,0 +1,91 @@
+{
+  "schema": "ziokt.guard-contracts.v1",
+  "python_target": "consensus_hold.py",
+  "predicates": {
+    "hold_may_start": {
+      "parameters": {
+        "active": "Bool",
+        "requires_authorization": "Bool",
+        "authorized": "Bool"
+      },
+      "expression": [
+        "and",
+        [
+          "not",
+          [
+            "var",
+            "active"
+          ]
+        ],
+        [
+          "or",
+          [
+            "not",
+            [
+              "var",
+              "requires_authorization"
+            ]
+          ],
+          [
+            "var",
+            "authorized"
+          ]
+        ]
+      ],
+      "lean_targets": [
+        "formal/Bootstrap.lean"
+      ],
+      "production_bindings": [
+        "consensus_hold.py"
+      ],
+      "binding_scope": "production predicate"
+    },
+    "block_linked": {
+      "parameters": {
+        "height": "Nat",
+        "digest": "String",
+        "next_height": "Nat",
+        "next_previous": "String"
+      },
+      "expression": [
+        "and",
+        [
+          "eq",
+          [
+            "var",
+            "next_height"
+          ],
+          [
+            "add",
+            [
+              "var",
+              "height"
+            ],
+            [
+              "nat",
+              1
+            ]
+          ]
+        ],
+        [
+          "eq",
+          [
+            "var",
+            "next_previous"
+          ],
+          [
+            "var",
+            "digest"
+          ]
+        ]
+      ],
+      "lean_targets": [
+        "formal/Bootstrap.lean"
+      ],
+      "production_bindings": [
+        "consensus_hold.py"
+      ],
+      "binding_scope": "production predicate"
+    }
+  }
+}
