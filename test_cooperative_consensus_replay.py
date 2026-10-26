@@ -37,6 +37,22 @@ class CooperativeConsensusReplayTests(unittest.TestCase):
             db.execute('DELETE FROM blocks')
             self.assertEqual(consensus.cooperative_state_at(db,'test-network',3),state)
 
+    def test_previously_approved_recovery_source_pin_is_preserved(self):
+        db=sqlite3.connect(':memory:')
+        db.row_factory=sqlite3.Row
+        db.executescript('CREATE TABLE blocks(height INTEGER,hash TEXT,transactions TEXT);'
+                         'CREATE TABLE compute_engines(compute_program_hash TEXT,verifier_script_hash TEXT,'
+                         'pkg_id TEXT,is_active INTEGER,engine_id TEXT);'
+                         'CREATE TABLE transactions(hash TEXT,type TEXT,data TEXT,block_height INTEGER);')
+        db.execute('INSERT INTO blocks VALUES(0,?,?)',('f'*64,'[]'))
+        old=next(iter(consensus.LEGACY_SOURCE_DIGESTS))
+        declaration={'verifier_source_sha256':old,'checkpoint':{'height':1}}
+        with patch.object(consensus.Recovery,'declaration',return_value=declaration), \
+             patch.object(consensus.Recovery,'active',return_value=None) as recovery_active, \
+             patch.object(consensus,'source_digest',return_value='e'*64):
+            self.assertIsNone(consensus.active(db,'ziokt-main-recovery-20261024',52))
+            self.assertEqual(recovery_active.call_args.args[3],old)
+
 
 if __name__=='__main__':
     unittest.main()
