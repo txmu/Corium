@@ -20,21 +20,25 @@ class CooperativeConsensusReplayTests(unittest.TestCase):
         expected=coop.apply(state,command,envelope['endorsements'])
         db=sqlite3.connect(':memory:')
         db.row_factory=sqlite3.Row
-        db.executescript('CREATE TABLE blocks(height INTEGER,transactions TEXT);'
+        db.executescript('CREATE TABLE blocks(height INTEGER,hash TEXT,transactions TEXT);'
                          'CREATE TABLE transactions(hash TEXT,type TEXT,data TEXT,block_height INTEGER);'
-                         'CREATE TABLE cooperative_registry(id INTEGER,state TEXT);')
-        db.execute('INSERT INTO blocks VALUES(2,?)',(json.dumps(['tx1']),))
+                         'CREATE TABLE cooperative_registry(id INTEGER,state TEXT,height INTEGER,block_hash TEXT,state_root TEXT);')
+        db.execute('INSERT INTO blocks VALUES(?,?,?)',(2,'c'*64,json.dumps(['tx1'])))
         db.execute('INSERT INTO transactions VALUES(?,?,?,?)',
                    ('tx1','cooperative_command',json.dumps(envelope),2))
-        db.execute('INSERT INTO cooperative_registry VALUES(1,?)',
-                   (json.dumps(coop.empty('b'*64)),))
+        db.execute('INSERT INTO cooperative_registry VALUES(1,?,?,?,?)',
+                   (json.dumps(coop.empty('b'*64)),2,'f'*64,coop.state_root(coop.empty('b'*64))))
         declaration={'checkpoint':{'height':1}}
         with patch.object(consensus.Recovery,'declaration',return_value=declaration), \
              patch.object(consensus.Recovery,'identity',return_value=chain):
             rebuilt=consensus.cooperative_state_at(db,'test-network',3)
             self.assertEqual(rebuilt,expected)
             self.assertEqual(consensus.Cooperative.state_root(rebuilt),coop.state_root(expected))
-            db.execute('DELETE FROM blocks')
+            db.execute('UPDATE cooperative_registry SET state=?,block_hash=?,state_root=? WHERE id=1',
+                       (json.dumps(expected),'c'*64,coop.state_root(expected)))
+            with patch.object(consensus.Cooperative,'apply',side_effect=AssertionError('valid anchored cache should be reused')):
+                self.assertEqual(consensus.cooperative_state_at(db,'test-network',3),expected)
+            db.execute('DELETE FROM blocks');db.execute('UPDATE transactions SET block_height=NULL')
             self.assertEqual(consensus.cooperative_state_at(db,'test-network',3),state)
 
     def test_previously_approved_recovery_source_pin_is_preserved(self):
