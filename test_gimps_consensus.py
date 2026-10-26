@@ -456,6 +456,28 @@ class GimpsConsensusTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             GIMPS.verify_prp_proof(4127, fraud_prime_claim)
 
+    def test_node_resource_limits_and_gerbicz_mathematical_checks(self):
+        # 1. Configurable node capacity limit enforcement
+        proof_4423 = GIMPS.generate_prp_proof(4423, base=3, depth=6, max_native_exponent=10000)
+        self.assertTrue(GIMPS.verify_prp_proof(4423, proof_4423, max_native_exponent=10000))
+
+        # Node configured with small capacity (e.g. 1000) safely rejects p=4423
+        with self.assertRaises(ValueError) as ctx:
+            GIMPS.verify_prp_proof(4423, proof_4423, max_native_exponent=1000)
+        self.assertIn("EXPONENT_EXCEEDS_LOCAL_NODE_CAPACITY", str(ctx.exception))
+
+        # External engine flag bypasses native Python bignum limits
+        mprime_proof = dict(proof_4423, engine='mprime')
+        self.assertTrue(GIMPS.verify_prp_proof(4423, mprime_proof, max_native_exponent=1000))
+
+        # 2. Gerbicz mathematical residue corruption rejected
+        tampered_math_chk = [dict(c) for c in proof_4423['gerbicz_checkpoints']]
+        if 'math_residue_q' in tampered_math_chk[0]:
+            tampered_math_chk[0]['math_residue_q'] = 999999
+            bad_math_proof = dict(proof_4423, gerbicz_checkpoints=tampered_math_chk)
+            with self.assertRaises(ValueError):
+                GIMPS.verify_prp_proof(4423, bad_math_proof)
+
 
 if __name__ == '__main__':
     unittest.main()

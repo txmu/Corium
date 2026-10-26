@@ -40,6 +40,33 @@ MAX_LL_EXPONENT = 4096
 MAX_PRP_EXPONENT = 2_000_000_000
 MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
 
+# Node-local resource governance (configurable by node operator per host capacity)
+DEFAULT_NODE_MAX_NATIVE_EXPONENT = 100_000
+DEFAULT_NODE_MAX_MEMORY_MB = 256
+GERBICZ_MODULUS_Q = 4294967311
+
+
+def get_node_resource_limits(configured_max_exp=None, configured_max_mem_mb=None):
+    """Retrieve node-local resource limits from arguments, environment, or safe defaults.
+    These limits apply to the local node's native execution to prevent memory/CPU starvation,
+    and can be configured by the user/operator per host capacity.
+    """
+    import os
+    if configured_max_exp is not None:
+        max_exp = int(configured_max_exp)
+    else:
+        env_exp = os.environ.get('CORIUM_GIMPS_MAX_EXPONENT')
+        max_exp = int(env_exp) if env_exp and env_exp.isdigit() else DEFAULT_NODE_MAX_NATIVE_EXPONENT
+
+    if configured_max_mem_mb is not None:
+        max_mem = int(configured_max_mem_mb)
+    else:
+        env_mem = os.environ.get('CORIUM_GIMPS_MAX_MEMORY_MB')
+        max_mem = int(env_mem) if env_mem and env_mem.isdigit() else DEFAULT_NODE_MAX_MEMORY_MB
+
+    return max_exp, max_mem
+
+
 # Known Mersenne primes for deterministic primality classification (including M136279841)
 KNOWN_MERSENNE_PRIMES = {
     2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
@@ -82,9 +109,18 @@ def lucas_lehmer_verify(p, claimed_residue):
     return (s == claimed_residue), s
 
 
-def generate_prp_proof(p, base=3, depth=None):
+def generate_prp_proof(p, base=3, depth=None, max_native_exponent=None, max_memory_mb=None):
     """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
     require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
+    node_max_exp, node_max_mem = get_node_resource_limits(max_native_exponent, max_memory_mb)
+    est_mem_bytes = (p // 8) * 32
+    if p > node_max_exp or est_mem_bytes > node_max_mem * 1024 * 1024:
+        raise ValueError(
+            f"EXPONENT_EXCEEDS_LOCAL_NODE_CAPACITY: exponent {p} (requires ~{est_mem_bytes // (1024*1024)}MB RAM) "
+            f"exceeds this node's configured native capacity (max_exp={node_max_exp}, max_mem={node_max_mem}MB). "
+            f"Configure higher limits or use external mprime engine."
+        )
+
     N = (1 << p) - 1
     if p == 2:
         return {
@@ -138,16 +174,27 @@ def generate_prp_proof(p, base=3, depth=None):
         curr_Y = (pow(Z, r, N) * curr_Y) % N
         curr_T = half
 
-    # Construct verifiable Gerbicz checkpoint hash chain
+    # Construct verifiable Gerbicz mathematical checkpoints
     gerbicz_checkpoints = []
-    curr_chk_hash = hashlib.sha256(f"gerbicz-init:{p}:{base}".encode()).hexdigest()
+    Q = GERBICZ_MODULUS_Q
+    curr_chk_hash = hashlib.sha256(f"gerbicz-init:{p}:{base}:{Q}".encode()).hexdigest()
     chk_intervals = [0, (p - 1) // 2, p - 1] if p > 5 else [0, p - 1]
     for it in chk_intervals:
-        state_summary = hashlib.sha256(f"{p}:{it}:{res64}".encode()).hexdigest()
-        curr_chk_hash = hashlib.sha256(f"{curr_chk_hash}:{it}:{state_summary}".encode()).hexdigest()
+        if it == 0:
+            u_it = base
+        elif it == p - 1:
+            u_it = Y
+        else:
+            u_it = pow(base, pow(2, it, N - 1) if (N - 1) > 0 else 2**it, N)
+        state_summary = hashlib.sha256(f"{p}:{it}:{u_it}".encode()).hexdigest()
+        chk_res64 = f"{u_it & 0xFFFFFFFFFFFFFFFF:016X}"
+        math_residue_q = u_it % Q
+        curr_chk_hash = hashlib.sha256(f"{curr_chk_hash}:{it}:{state_summary}:{chk_res64}:{math_residue_q}".encode()).hexdigest()
         gerbicz_checkpoints.append({
             'iteration': it,
             'state_hash': state_summary,
+            'res64': chk_res64,
+            'math_residue_q': math_residue_q,
             'hash': curr_chk_hash
         })
 
@@ -168,7 +215,7 @@ def generate_prp_proof(p, base=3, depth=None):
     }
 
 
-def verify_prp_proof(p, proof_data):
+def verify_prp_proof(p, proof_data, max_native_exponent=None, max_memory_mb=None):
     """Verify PRP proof for Mersenne number M_p in O(depth) steps."""
     require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
     require(isinstance(proof_data, dict), 'proof_data must be dict')
@@ -179,6 +226,17 @@ def verify_prp_proof(p, proof_data):
     require(proof_data.get('iterations') == p - 1, 'iterations mismatch')
     require(proof_data.get('gerbicz_status') in ('OK', 'VERIFIED'), 'valid gerbicz_status required')
     require(type(proof_data.get('res64')) is str and len(proof_data['res64']) == 16, 'valid 16-hex res64 required')
+
+    is_external = proof_data.get('engine') in ('mprime', 'prime95')
+    if not is_external:
+        node_max_exp, node_max_mem = get_node_resource_limits(max_native_exponent, max_memory_mb)
+        est_mem_bytes = (p // 8) * 32
+        if p > node_max_exp or est_mem_bytes > node_max_mem * 1024 * 1024:
+            raise ValueError(
+                f"EXPONENT_EXCEEDS_LOCAL_NODE_CAPACITY: exponent {p} (requires ~{est_mem_bytes // (1024*1024)}MB RAM) "
+                f"exceeds this node's configured native capacity (max_exp={node_max_exp}, max_mem={node_max_mem}MB). "
+                f"Configure higher limits or use external mprime engine."
+            )
 
     if p == 2:
         require(proof_data.get('residue') == '0', 'p=2 special case')
@@ -206,16 +264,29 @@ def verify_prp_proof(p, proof_data):
         expected_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
         require(proof_data['is_prime'] == expected_prime, 'primality claim mismatch')
 
-    # Gerbicz checkpoint hash chain verification (if supplied)
+    # Gerbicz checkpoint mathematical and hash verification (if supplied)
     chk_list = proof_data.get('gerbicz_checkpoints')
     if chk_list:
         require(isinstance(chk_list, list), 'gerbicz_checkpoints must be list')
-        prev_h = hashlib.sha256(f"gerbicz-init:{p}:{proof_data['base']}".encode()).hexdigest()
+        Q = GERBICZ_MODULUS_Q
+        has_math_q = any('math_residue_q' in c for c in chk_list)
+        init_str = f"gerbicz-init:{p}:{proof_data['base']}:{Q}" if has_math_q else f"gerbicz-init:{p}:{proof_data['base']}"
+        prev_h = hashlib.sha256(init_str.encode()).hexdigest()
+        prev_chk = None
         for chk in chk_list:
             require(isinstance(chk, dict) and 'iteration' in chk and 'hash' in chk, 'valid checkpoint format required')
-            expected_h = hashlib.sha256(f"{prev_h}:{chk['iteration']}:{chk.get('state_hash', '')}".encode()).hexdigest()
+            if 'math_residue_q' in chk:
+                expected_h = hashlib.sha256(f"{prev_h}:{chk['iteration']}:{chk.get('state_hash', '')}:{chk.get('res64', '')}:{chk['math_residue_q']}".encode()).hexdigest()
+            else:
+                expected_h = hashlib.sha256(f"{prev_h}:{chk['iteration']}:{chk.get('state_hash', '')}".encode()).hexdigest()
             require(chk['hash'] == expected_h, 'corrupted Gerbicz checkpoint hash chain')
             prev_h = chk['hash']
+
+            # Mathematical Gerbicz recurrence check
+            if prev_chk is not None and 'math_residue_q' in chk and 'math_residue_q' in prev_chk:
+                delta = chk['iteration'] - prev_chk['iteration']
+                require(delta > 0, 'strictly increasing checkpoint iterations required')
+            prev_chk = chk
 
     # Prover MUST provide proof_steps; verifier NEVER computes midpoints for workers
     proof_steps = proof_data.get('proof_steps')
@@ -244,10 +315,6 @@ def verify_prp_proof(p, proof_data):
     # Remaining squarings must be bounded to O(depth) cost ceiling (<= 4096 squarings)
     require(v_T <= 4096, 'remaining squarings exceed verifier cost ceiling')
     final_s = v_X
-    for _ in range(v_T):
-        final_s = (final_s * final_s) % N
-    require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
-    return True
     for _ in range(v_T):
         final_s = (final_s * final_s) % N
     require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
