@@ -56,6 +56,9 @@ jobs:
       - name: Native ZKT reputation system
         if: ${{ !cancelled() }}
         run: python -m unittest -v test_zkt
+      - name: Native GIMPS arithmetic, ownership and settlement boundaries
+        if: ${{ !cancelled() }}
+        run: python -m unittest -v test_gimps_consensus
       - name: All original suites (BLOCKED fails)
         if: ${{ !cancelled() }}
         run: bash test_all.sh

@@ -466,9 +466,10 @@ class GimpsConsensusTests(unittest.TestCase):
             GIMPS.verify_prp_proof(4423, proof_4423, max_native_exponent=1000)
         self.assertIn("EXPONENT_EXCEEDS_LOCAL_NODE_CAPACITY", str(ctx.exception))
 
-        # External engine flag bypasses native Python bignum limits
+        # Submitter engine labels never bypass local verifier limits
         mprime_proof = dict(proof_4423, engine='mprime')
-        self.assertTrue(GIMPS.verify_prp_proof(4423, mprime_proof, max_native_exponent=1000))
+        with self.assertRaisesRegex(ValueError, 'EXPONENT_EXCEEDS_LOCAL_NODE_CAPACITY'):
+            GIMPS.verify_prp_proof(4423, mprime_proof, max_native_exponent=1000)
 
         # 2. Gerbicz mathematical residue corruption rejected
         tampered_math_chk = [dict(c) for c in proof_4423['gerbicz_checkpoints']]
