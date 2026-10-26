@@ -315,6 +315,112 @@ class GimpsConsensusTests(unittest.TestCase):
             # When fraudulent proof is challenged, validate_challenge returns 0 (proof invalid, challenge succeeds)
             self.assertEqual(GIMPS.validate_challenge(db, 'test-net', 'tx_fraud'), 0)
 
+    def test_prp_proof_generation_and_verification(self):
+        for p in [2, 3, 5, 7, 11, 13, 17, 31]:
+            proof = GIMPS.generate_prp_proof(p, base=3, depth=4)
+            self.assertEqual(proof['schema'], GIMPS.PRP_SCHEMA)
+            self.assertEqual(proof['exponent'], p)
+            self.assertTrue(GIMPS.verify_prp_proof(p, proof))
+            if p in [2, 3, 5, 7, 13, 17, 31]:
+                self.assertTrue(proof['is_prime'], f"p={p} should be Mersenne prime")
+            elif p == 11:
+                self.assertFalse(proof['is_prime'], f"p=11 should be composite (2047=23*89)")
+
+    def test_prp_proof_fiat_shamir_tamper_resistance(self):
+        proof = GIMPS.generate_prp_proof(13, base=3, depth=3)
+        self.assertTrue(GIMPS.verify_prp_proof(13, proof))
+
+        # 1. Tamper with residue
+        bad_residue = dict(proof, residue='8189')  # Correct is 8190
+        with self.assertRaises(ValueError):
+            GIMPS.verify_prp_proof(13, bad_residue)
+
+        # 2. Tamper with res64
+        bad_res64 = dict(proof, res64='0000000000000000')
+        with self.assertRaises(ValueError):
+            GIMPS.verify_prp_proof(13, bad_res64)
+
+        # 3. Tamper with is_prime claim
+        bad_claim = dict(proof, is_prime=False)
+        with self.assertRaises(ValueError):
+            GIMPS.verify_prp_proof(13, bad_claim)
+
+        # 4. Tamper with midpoint in proof_steps
+        if proof['proof_steps']:
+            bad_steps = [dict(s) for s in proof['proof_steps']]
+            bad_steps[0]['Z'] = '0x123'
+            with self.assertRaises(ValueError):
+                GIMPS.verify_prp_proof(13, dict(proof, proof_steps=bad_steps))
+
+    def test_prp_on_chain_validation_and_settlement_three_tier_separation(self):
+        with sqlite3.connect(self.db_path) as db:
+            GIMPS.init_schema(db)
+            pubkey = "secp256k1_pubkey_user_prp"
+            sender = hashlib.sha256(pubkey.encode()).hexdigest()
+            proof = GIMPS.generate_prp_proof(7, base=3, depth=4)
+            tx_data = {
+                'engine_id': 'gimps-ci',
+                'problem_id': '7',
+                'proof_data': proof
+            }
+            # Pre-populate task in gimps_tasks
+            GIMPS.update_primenet_status(db, 'gimps-ci', 7, 'submitted', attestation='PRIME-NET-ASSIGN-7')
+            val = GIMPS.validate_gimps_proof(db, 'test-net', tx_data, sender, 10)
+            self.assertEqual(val['status'], 'valid')
+            self.assertTrue(val['math_certified'])
+            self.assertEqual(val['primenet_status'], 'submitted')
+            self.assertFalse(val['corium_settled'])
+
+            tx_hash = "tx_prp_p7"
+            db.execute("INSERT INTO transactions VALUES (?, 'submit_math_proof', ?, ?, 'sig', 1000, 10)",
+                       (tx_hash, json.dumps(tx_data), pubkey))
+            db.execute("INSERT INTO pending_proofs VALUES ('7', ?, ?, 'result_data', 20)",
+                       (tx_hash, sender))
+
+            settle_res = GIMPS.settle(db, 'test-net', tx_hash, 25)
+            self.assertTrue(settle_res['math_certified'])
+            self.assertTrue(settle_res['corium_settled'])
+            self.assertEqual(settle_res['settled_height'], 25)
+
+            # Check database recorded both completed task and gimps_tasks state
+            done = db.execute("SELECT proof_tx_hash FROM completed_compute_tasks WHERE engine_id='gimps-ci' AND problem_id='7'").fetchone()
+            self.assertIsNotNone(done)
+            task_row = db.execute("SELECT state, math_certified, corium_settled, primenet_status FROM gimps_tasks WHERE engine_id='gimps-ci' AND exponent=7").fetchone()
+            self.assertEqual(task_row[0], 'settled')
+            self.assertEqual(task_row[1], 1)
+            self.assertEqual(task_row[2], 1)
+            self.assertEqual(task_row[3], 'submitted')
+
+    def test_stateful_task_lifecycle_pause_resume_renew(self):
+        with sqlite3.connect(self.db_path) as db:
+            GIMPS.init_schema(db)
+            db.execute("INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, assigned_to, assigned_at, lease_timeout) "
+                       "VALUES ('gimps-ci', 'ps-1', 5, 'assigned', 'worker_alpha', 1000, 1600)")
+
+            # Renew lease with checkpoint
+            chk = {'iteration': 500, 'midpoint': '0xABC'}
+            renew_res = GIMPS.renew_lease(db, 'gimps-ci', 5, 'worker_alpha', checkpoint_data=chk, lease_duration=300, current_time=1200)
+            self.assertEqual(renew_res['status'], 'renewed')
+            self.assertEqual(renew_res['lease_timeout'], 1500)
+
+            # Different worker cannot renew
+            with self.assertRaises(ValueError):
+                GIMPS.renew_lease(db, 'gimps-ci', 5, 'worker_beta', current_time=1200)
+
+            # Pause task
+            pause_res = GIMPS.pause_task(db, 'gimps-ci', 5, 'worker_alpha', checkpoint_data={'iteration': 600}, current_time=1300)
+            self.assertEqual(pause_res['status'], 'paused')
+
+            # Cannot pause non-assigned task
+            with self.assertRaises(ValueError):
+                GIMPS.pause_task(db, 'gimps-ci', 5, 'worker_alpha', current_time=1300)
+
+            # Resume task
+            resume_res = GIMPS.resume_task(db, 'gimps-ci', 5, 'worker_gamma', lease_duration=600, current_time=1400)
+            self.assertEqual(resume_res['status'], 'resumed')
+            self.assertEqual(resume_res['checkpoint'], {'iteration': 600})
+            self.assertEqual(resume_res['assigned_to'], 'worker_gamma')
+
 
 if __name__ == '__main__':
     unittest.main()
