@@ -56,9 +56,9 @@ def plan(old_chain,prefix_chain,genesis,state,first_new_height=51,target_height=
       'trust_dependencies':['supplied legacy genesis configuration','native prefix replay implementation',
                            'legacy core_gpg_authority input','explicit sidechain legacy checkpoint'],
       'release_blockers':['native block/transaction/signature domain integration',
-                          'uniform accept/sync/reorg/replay and wallet validation',
+                          'recovery network activation and complete primary/sidechain replay',
                           'atomic persistent RNA replay protection in native delivery',
-                          'cooperative native state and asset/control transition integration',
+                          'cooperative authorization for native asset/control transitions',
                           'actual new blocks 51..64 and replayed state comparison',
                           'distinct protocol process tests and atomic routing cutover'],
       'production_history_modified':False}
