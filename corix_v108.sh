@@ -1992,16 +1992,17 @@ def _load_native_gimps():
     MAX_INTEGER = 2**63 - 1
     DEFAULT_LEASE_SECONDS = 86400
     MAX_LL_EXPONENT = 4096
-    MAX_PRP_EXPONENT = 100_000_000
+    MAX_PRP_EXPONENT = 2_000_000_000
     MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
 
-    # Known Mersenne primes for deterministic primality classification
+    # Known Mersenne primes for deterministic primality classification (including M136279841)
     KNOWN_MERSENNE_PRIMES = {
         2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
         2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
         86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
         3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
-        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917,
+        82589933, 136279841
     }
 
 
@@ -2036,7 +2037,7 @@ def _load_native_gimps():
         return (s == claimed_residue), s
 
 
-    def generate_prp_proof(p, base=3, depth=4):
+    def generate_prp_proof(p, base=3, depth=None):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
         require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
@@ -2072,8 +2073,9 @@ def _load_native_gimps():
 
         proof_steps = []
         curr_X, curr_Y, curr_T = X, Y, T
-        for _ in range(depth):
-            if curr_T <= 1:
+        max_folds = depth if depth is not None else 64
+        for fold_idx in range(max_folds):
+            if curr_T <= 1 or (depth is None and curr_T <= 4096 and fold_idx >= 4):
                 break
             was_odd = (curr_T % 2 == 1)
             if was_odd:
@@ -2174,7 +2176,7 @@ def _load_native_gimps():
         proof_steps = proof_data.get('proof_steps')
         require(isinstance(proof_steps, list), 'valid proof_steps required')
         require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
-        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
+        require(len(proof_steps) <= 64, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -2578,7 +2580,7 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,9}', problem_id), 'canonical exponent string required')
         proof_schema = proof_data.get('schema')
         is_prp_schema = (proof_schema == PRP_SCHEMA)
         max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
@@ -6641,16 +6643,17 @@ def _load_native_gimps():
     MAX_INTEGER = 2**63 - 1
     DEFAULT_LEASE_SECONDS = 86400
     MAX_LL_EXPONENT = 4096
-    MAX_PRP_EXPONENT = 100_000_000
+    MAX_PRP_EXPONENT = 2_000_000_000
     MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
 
-    # Known Mersenne primes for deterministic primality classification
+    # Known Mersenne primes for deterministic primality classification (including M136279841)
     KNOWN_MERSENNE_PRIMES = {
         2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
         2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
         86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
         3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
-        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917,
+        82589933, 136279841
     }
 
 
@@ -6685,7 +6688,7 @@ def _load_native_gimps():
         return (s == claimed_residue), s
 
 
-    def generate_prp_proof(p, base=3, depth=4):
+    def generate_prp_proof(p, base=3, depth=None):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
         require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
@@ -6721,8 +6724,9 @@ def _load_native_gimps():
 
         proof_steps = []
         curr_X, curr_Y, curr_T = X, Y, T
-        for _ in range(depth):
-            if curr_T <= 1:
+        max_folds = depth if depth is not None else 64
+        for fold_idx in range(max_folds):
+            if curr_T <= 1 or (depth is None and curr_T <= 4096 and fold_idx >= 4):
                 break
             was_odd = (curr_T % 2 == 1)
             if was_odd:
@@ -6823,7 +6827,7 @@ def _load_native_gimps():
         proof_steps = proof_data.get('proof_steps')
         require(isinstance(proof_steps, list), 'valid proof_steps required')
         require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
-        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
+        require(len(proof_steps) <= 64, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -7227,7 +7231,7 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,9}', problem_id), 'canonical exponent string required')
         proof_schema = proof_data.get('schema')
         is_prp_schema = (proof_schema == PRP_SCHEMA)
         max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
@@ -11299,16 +11303,17 @@ def _load_native_gimps():
     MAX_INTEGER = 2**63 - 1
     DEFAULT_LEASE_SECONDS = 86400
     MAX_LL_EXPONENT = 4096
-    MAX_PRP_EXPONENT = 100_000_000
+    MAX_PRP_EXPONENT = 2_000_000_000
     MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
 
-    # Known Mersenne primes for deterministic primality classification
+    # Known Mersenne primes for deterministic primality classification (including M136279841)
     KNOWN_MERSENNE_PRIMES = {
         2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
         2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
         86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
         3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
-        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917,
+        82589933, 136279841
     }
 
 
@@ -11343,7 +11348,7 @@ def _load_native_gimps():
         return (s == claimed_residue), s
 
 
-    def generate_prp_proof(p, base=3, depth=4):
+    def generate_prp_proof(p, base=3, depth=None):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
         require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
@@ -11379,8 +11384,9 @@ def _load_native_gimps():
 
         proof_steps = []
         curr_X, curr_Y, curr_T = X, Y, T
-        for _ in range(depth):
-            if curr_T <= 1:
+        max_folds = depth if depth is not None else 64
+        for fold_idx in range(max_folds):
+            if curr_T <= 1 or (depth is None and curr_T <= 4096 and fold_idx >= 4):
                 break
             was_odd = (curr_T % 2 == 1)
             if was_odd:
@@ -11481,7 +11487,7 @@ def _load_native_gimps():
         proof_steps = proof_data.get('proof_steps')
         require(isinstance(proof_steps, list), 'valid proof_steps required')
         require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
-        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
+        require(len(proof_steps) <= 64, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -11885,7 +11891,7 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,9}', problem_id), 'canonical exponent string required')
         proof_schema = proof_data.get('schema')
         is_prp_schema = (proof_schema == PRP_SCHEMA)
         max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
@@ -15454,16 +15460,17 @@ def _load_native_gimps():
     MAX_INTEGER = 2**63 - 1
     DEFAULT_LEASE_SECONDS = 86400
     MAX_LL_EXPONENT = 4096
-    MAX_PRP_EXPONENT = 100_000_000
+    MAX_PRP_EXPONENT = 2_000_000_000
     MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
 
-    # Known Mersenne primes for deterministic primality classification
+    # Known Mersenne primes for deterministic primality classification (including M136279841)
     KNOWN_MERSENNE_PRIMES = {
         2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
         2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
         86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
         3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
-        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917,
+        82589933, 136279841
     }
 
 
@@ -15498,7 +15505,7 @@ def _load_native_gimps():
         return (s == claimed_residue), s
 
 
-    def generate_prp_proof(p, base=3, depth=4):
+    def generate_prp_proof(p, base=3, depth=None):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
         require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
@@ -15534,8 +15541,9 @@ def _load_native_gimps():
 
         proof_steps = []
         curr_X, curr_Y, curr_T = X, Y, T
-        for _ in range(depth):
-            if curr_T <= 1:
+        max_folds = depth if depth is not None else 64
+        for fold_idx in range(max_folds):
+            if curr_T <= 1 or (depth is None and curr_T <= 4096 and fold_idx >= 4):
                 break
             was_odd = (curr_T % 2 == 1)
             if was_odd:
@@ -15636,7 +15644,7 @@ def _load_native_gimps():
         proof_steps = proof_data.get('proof_steps')
         require(isinstance(proof_steps, list), 'valid proof_steps required')
         require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
-        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
+        require(len(proof_steps) <= 64, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -16040,7 +16048,7 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,9}', problem_id), 'canonical exponent string required')
         proof_schema = proof_data.get('schema')
         is_prp_schema = (proof_schema == PRP_SCHEMA)
         max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
@@ -19550,16 +19558,17 @@ def _load_native_gimps():
     MAX_INTEGER = 2**63 - 1
     DEFAULT_LEASE_SECONDS = 86400
     MAX_LL_EXPONENT = 4096
-    MAX_PRP_EXPONENT = 100_000_000
+    MAX_PRP_EXPONENT = 2_000_000_000
     MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
 
-    # Known Mersenne primes for deterministic primality classification
+    # Known Mersenne primes for deterministic primality classification (including M136279841)
     KNOWN_MERSENNE_PRIMES = {
         2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
         2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
         86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
         3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
-        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917,
+        82589933, 136279841
     }
 
 
@@ -19594,7 +19603,7 @@ def _load_native_gimps():
         return (s == claimed_residue), s
 
 
-    def generate_prp_proof(p, base=3, depth=4):
+    def generate_prp_proof(p, base=3, depth=None):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
         require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
@@ -19630,8 +19639,9 @@ def _load_native_gimps():
 
         proof_steps = []
         curr_X, curr_Y, curr_T = X, Y, T
-        for _ in range(depth):
-            if curr_T <= 1:
+        max_folds = depth if depth is not None else 64
+        for fold_idx in range(max_folds):
+            if curr_T <= 1 or (depth is None and curr_T <= 4096 and fold_idx >= 4):
                 break
             was_odd = (curr_T % 2 == 1)
             if was_odd:
@@ -19732,7 +19742,7 @@ def _load_native_gimps():
         proof_steps = proof_data.get('proof_steps')
         require(isinstance(proof_steps, list), 'valid proof_steps required')
         require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
-        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
+        require(len(proof_steps) <= 64, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -20136,7 +20146,7 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,9}', problem_id), 'canonical exponent string required')
         proof_schema = proof_data.get('schema')
         is_prp_schema = (proof_schema == PRP_SCHEMA)
         max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
@@ -23646,16 +23656,17 @@ def _load_native_gimps():
     MAX_INTEGER = 2**63 - 1
     DEFAULT_LEASE_SECONDS = 86400
     MAX_LL_EXPONENT = 4096
-    MAX_PRP_EXPONENT = 100_000_000
+    MAX_PRP_EXPONENT = 2_000_000_000
     MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
 
-    # Known Mersenne primes for deterministic primality classification
+    # Known Mersenne primes for deterministic primality classification (including M136279841)
     KNOWN_MERSENNE_PRIMES = {
         2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
         2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
         86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
         3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
-        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917,
+        82589933, 136279841
     }
 
 
@@ -23690,7 +23701,7 @@ def _load_native_gimps():
         return (s == claimed_residue), s
 
 
-    def generate_prp_proof(p, base=3, depth=4):
+    def generate_prp_proof(p, base=3, depth=None):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
         require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
@@ -23726,8 +23737,9 @@ def _load_native_gimps():
 
         proof_steps = []
         curr_X, curr_Y, curr_T = X, Y, T
-        for _ in range(depth):
-            if curr_T <= 1:
+        max_folds = depth if depth is not None else 64
+        for fold_idx in range(max_folds):
+            if curr_T <= 1 or (depth is None and curr_T <= 4096 and fold_idx >= 4):
                 break
             was_odd = (curr_T % 2 == 1)
             if was_odd:
@@ -23828,7 +23840,7 @@ def _load_native_gimps():
         proof_steps = proof_data.get('proof_steps')
         require(isinstance(proof_steps, list), 'valid proof_steps required')
         require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
-        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
+        require(len(proof_steps) <= 64, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -24232,7 +24244,7 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,9}', problem_id), 'canonical exponent string required')
         proof_schema = proof_data.get('schema')
         is_prp_schema = (proof_schema == PRP_SCHEMA)
         max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
@@ -33284,16 +33296,17 @@ PRP_SCHEMA = 'corium.gimps-prp-proof.v1'
 MAX_INTEGER = 2**63 - 1
 DEFAULT_LEASE_SECONDS = 86400
 MAX_LL_EXPONENT = 4096
-MAX_PRP_EXPONENT = 100_000_000
+MAX_PRP_EXPONENT = 2_000_000_000
 MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
 
-# Known Mersenne primes for deterministic primality classification
+# Known Mersenne primes for deterministic primality classification (including M136279841)
 KNOWN_MERSENNE_PRIMES = {
     2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
     2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
     86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
     3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
-    32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+    32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917,
+    82589933, 136279841
 }
 
 
@@ -33328,7 +33341,7 @@ def lucas_lehmer_verify(p, claimed_residue):
     return (s == claimed_residue), s
 
 
-def generate_prp_proof(p, base=3, depth=4):
+def generate_prp_proof(p, base=3, depth=None):
     """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
     require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
     N = (1 << p) - 1
@@ -33364,8 +33377,9 @@ def generate_prp_proof(p, base=3, depth=4):
 
     proof_steps = []
     curr_X, curr_Y, curr_T = X, Y, T
-    for _ in range(depth):
-        if curr_T <= 1:
+    max_folds = depth if depth is not None else 64
+    for fold_idx in range(max_folds):
+        if curr_T <= 1 or (depth is None and curr_T <= 4096 and fold_idx >= 4):
             break
         was_odd = (curr_T % 2 == 1)
         if was_odd:
@@ -33466,7 +33480,7 @@ def verify_prp_proof(p, proof_data):
     proof_steps = proof_data.get('proof_steps')
     require(isinstance(proof_steps, list), 'valid proof_steps required')
     require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
-    require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
+    require(len(proof_steps) <= 64, 'proof_steps exceeds maximum depth')
 
     v_X = 3
     v_Y = (3 * y) % N
@@ -33870,7 +33884,7 @@ def validate_gimps_proof(db, network, payload, sender, height, accepted_tx=None)
 
     integer(weight, 0, MAX_INTEGER // 100)
     integer(height, 0, MAX_INTEGER)
-    require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+    require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,9}', problem_id), 'canonical exponent string required')
     proof_schema = proof_data.get('schema')
     is_prp_schema = (proof_schema == PRP_SCHEMA)
     max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
