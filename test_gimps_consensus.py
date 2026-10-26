@@ -421,6 +421,41 @@ class GimpsConsensusTests(unittest.TestCase):
             self.assertEqual(resume_res['checkpoint'], {'iteration': 600})
             self.assertEqual(resume_res['assigned_to'], 'worker_gamma')
 
+    def test_decoupled_large_exponent_prover_separation_and_gerbicz_checkpoints(self):
+        # 1. Large exponent p > 4096 decoupled verification (p = 4423, 2^4423 - 1 Mersenne prime)
+        proof_4423 = GIMPS.generate_prp_proof(4423, base=3, depth=6)
+        self.assertEqual(proof_4423['exponent'], 4423)
+        self.assertTrue(proof_4423['is_prp'])
+        self.assertEqual(proof_4423['prp_result'], 'PRP')
+        self.assertTrue(proof_4423['is_prime'])  # 4423 is in KNOWN_MERSENNE_PRIMES
+        self.assertTrue(GIMPS.verify_prp_proof(4423, proof_4423))
+        self.assertGreater(len(proof_4423['gerbicz_checkpoints']), 0)
+
+        # 2. Strict prover-verifier separation: verifier rejects missing proof_steps
+        bad_prover_proof = dict(proof_4423, proof_steps=[])
+        with self.assertRaises(ValueError):
+            GIMPS.verify_prp_proof(4423, bad_prover_proof)
+
+        # 3. Tampered Gerbicz checkpoint hash chain rejected
+        tampered_chk = [dict(c) for c in proof_4423['gerbicz_checkpoints']]
+        tampered_chk[0]['hash'] = '00' * 32
+        bad_chk_proof = dict(proof_4423, gerbicz_checkpoints=tampered_chk)
+        with self.assertRaises(ValueError):
+            GIMPS.verify_prp_proof(4423, bad_chk_proof)
+
+        # 4. Accurate Primality semantics for non-prime / unproven exponent
+        # For p=4127 (composite), is_prp must be False
+        proof_4127 = GIMPS.generate_prp_proof(4127, base=3, depth=6)
+        self.assertFalse(proof_4127['is_prp'])
+        self.assertEqual(proof_4127['prp_result'], 'COMPOSITE')
+        self.assertFalse(proof_4127['is_prime'])
+        self.assertTrue(GIMPS.verify_prp_proof(4127, proof_4127))
+
+        # Attacker falsely claiming deterministic is_prime=True on composite or unproven
+        fraud_prime_claim = dict(proof_4127, is_prime=True)
+        with self.assertRaises(ValueError):
+            GIMPS.verify_prp_proof(4127, fraud_prime_claim)
+
 
 if __name__ == '__main__':
     unittest.main()

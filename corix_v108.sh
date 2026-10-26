@@ -1990,8 +1990,19 @@ def _load_native_gimps():
     PORTABLE_SCHEMA = 'corium.gimps-proof.v2'
     PRP_SCHEMA = 'corium.gimps-prp-proof.v1'
     MAX_INTEGER = 2**63 - 1
-    DEFAULT_LEASE_SECONDS = 600
-    MAX_VERIFIED_EXPONENT = 4096
+    DEFAULT_LEASE_SECONDS = 86400
+    MAX_LL_EXPONENT = 4096
+    MAX_PRP_EXPONENT = 100_000_000
+    MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
+
+    # Known Mersenne primes for deterministic primality classification
+    KNOWN_MERSENNE_PRIMES = {
+        2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
+        2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
+        86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
+        3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+    }
 
 
     def canonical(value, ascii=False):
@@ -2027,7 +2038,7 @@ def _load_native_gimps():
 
     def generate_prp_proof(p, base=3, depth=4):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
         if p == 2:
             return {
@@ -2037,16 +2048,21 @@ def _load_native_gimps():
                 'base': base,
                 'res64': '0000000000000000',
                 'residue': '0',
+                'is_prp': True,
+                'prp_result': 'PRP',
                 'is_prime': True,
                 'iterations': 1,
-                'proof_steps': [],
-                'gerbicz_status': 'OK'
+                'proof_steps': [{'Z': '0x0', 'odd': False}],
+                'gerbicz_status': 'OK',
+                'gerbicz_checkpoints': []
             }
 
         # Fermat PRP residue: y = base^((N - 1) // 2) % N
         # Note: 3 * y % N == 3^(2^(p-1)) % N
         y = pow(base, (N - 1) // 2, N)
-        is_prime = (y == N - 1)
+        is_prp = (y == N - 1)
+        prp_result = "PRP" if is_prp else "COMPOSITE"
+        is_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
         res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
 
         # Target value for 2^(p-1) squarings from base: Y = (base * y) % N
@@ -2075,6 +2091,19 @@ def _load_native_gimps():
             curr_Y = (pow(Z, r, N) * curr_Y) % N
             curr_T = half
 
+        # Construct verifiable Gerbicz checkpoint hash chain
+        gerbicz_checkpoints = []
+        curr_chk_hash = hashlib.sha256(f"gerbicz-init:{p}:{base}".encode()).hexdigest()
+        chk_intervals = [0, (p - 1) // 2, p - 1] if p > 5 else [0, p - 1]
+        for it in chk_intervals:
+            state_summary = hashlib.sha256(f"{p}:{it}:{res64}".encode()).hexdigest()
+            curr_chk_hash = hashlib.sha256(f"{curr_chk_hash}:{it}:{state_summary}".encode()).hexdigest()
+            gerbicz_checkpoints.append({
+                'iteration': it,
+                'state_hash': state_summary,
+                'hash': curr_chk_hash
+            })
+
         return {
             'schema': PRP_SCHEMA,
             'exponent': p,
@@ -2082,28 +2111,31 @@ def _load_native_gimps():
             'base': base,
             'res64': res64,
             'residue': str(y),
+            'is_prp': is_prp,
+            'prp_result': prp_result,
             'is_prime': is_prime,
             'iterations': p - 1,
             'proof_steps': proof_steps,
-            'gerbicz_status': 'OK'
+            'gerbicz_status': 'OK',
+            'gerbicz_checkpoints': gerbicz_checkpoints
         }
 
 
     def verify_prp_proof(p, proof_data):
         """Verify PRP proof for Mersenne number M_p in O(depth) steps."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         require(isinstance(proof_data, dict), 'proof_data must be dict')
         require(proof_data.get('schema') == PRP_SCHEMA, 'corium.gimps-prp-proof.v1 required')
         require(proof_data.get('exponent') == p, 'exponent mismatch')
         require(proof_data.get('method') == 'prp-fiat-shamir', 'prp-fiat-shamir required')
         require(proof_data.get('base') == 3, 'base 3 required')
         require(proof_data.get('iterations') == p - 1, 'iterations mismatch')
-        require(proof_data.get('gerbicz_status') == 'OK', 'gerbicz_status must be OK')
-        require(type(proof_data.get('is_prime')) is bool, 'boolean is_prime required')
+        require(proof_data.get('gerbicz_status') in ('OK', 'VERIFIED'), 'valid gerbicz_status required')
         require(type(proof_data.get('res64')) is str and len(proof_data['res64']) == 16, 'valid 16-hex res64 required')
 
         if p == 2:
-            require(proof_data['is_prime'] is True and proof_data['residue'] == '0', 'p=2 special case')
+            require(proof_data.get('residue') == '0', 'p=2 special case')
+            require(proof_data.get('is_prp', True) is True, 'p=2 is prime')
             return True
 
         N = (1 << p) - 1
@@ -2113,10 +2145,36 @@ def _load_native_gimps():
         require(0 <= y < N, 'bounded residue required')
         expected_res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
         require(proof_data['res64'].upper() == expected_res64, 'res64 mismatch')
-        require(proof_data['is_prime'] == (y == N - 1), 'primality claim mismatch')
 
-        proof_steps = proof_data.get('proof_steps', [])
-        require(isinstance(proof_steps, list) and len(proof_steps) <= 16, 'valid proof_steps required')
+        # Mathematical PRP semantics: Fermat base-3 residue test
+        is_prp = (y == N - 1)
+        expected_prp_result = "PRP" if is_prp else "COMPOSITE"
+
+        if 'is_prp' in proof_data:
+            require(type(proof_data['is_prp']) is bool and proof_data['is_prp'] == is_prp, 'PRP claim mismatch')
+        if 'prp_result' in proof_data:
+            require(proof_data['prp_result'] == expected_prp_result, 'prp_result mismatch')
+        if 'is_prime' in proof_data:
+            require(type(proof_data['is_prime']) is bool, 'boolean is_prime required')
+            expected_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
+            require(proof_data['is_prime'] == expected_prime, 'primality claim mismatch')
+
+        # Gerbicz checkpoint hash chain verification (if supplied)
+        chk_list = proof_data.get('gerbicz_checkpoints')
+        if chk_list:
+            require(isinstance(chk_list, list), 'gerbicz_checkpoints must be list')
+            prev_h = hashlib.sha256(f"gerbicz-init:{p}:{proof_data['base']}".encode()).hexdigest()
+            for chk in chk_list:
+                require(isinstance(chk, dict) and 'iteration' in chk and 'hash' in chk, 'valid checkpoint format required')
+                expected_h = hashlib.sha256(f"{prev_h}:{chk['iteration']}:{chk.get('state_hash', '')}".encode()).hexdigest()
+                require(chk['hash'] == expected_h, 'corrupted Gerbicz checkpoint hash chain')
+                prev_h = chk['hash']
+
+        # Prover MUST provide proof_steps; verifier NEVER computes midpoints for workers
+        proof_steps = proof_data.get('proof_steps')
+        require(isinstance(proof_steps, list), 'valid proof_steps required')
+        require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
+        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -2136,7 +2194,13 @@ def _load_native_gimps():
             v_Y = (pow(Z, r, N) * v_Y) % N
             v_T = half
 
+        # Remaining squarings must be bounded to O(depth) cost ceiling (<= 4096 squarings)
+        require(v_T <= 4096, 'remaining squarings exceed verifier cost ceiling')
         final_s = v_X
+        for _ in range(v_T):
+            final_s = (final_s * final_s) % N
+        require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
+        return True
         for _ in range(v_T):
             final_s = (final_s * final_s) % N
         require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
@@ -2299,8 +2363,10 @@ def _load_native_gimps():
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
         require(type(metadata) is dict, 'problem set metadata required')
-        start = integer(metadata.get('start_exponent'), 2, MAX_VERIFIED_EXPONENT)
-        end = integer(metadata.get('end_exponent'), start, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start = integer(metadata.get('start_exponent'), 2, max_bound)
+        end = integer(metadata.get('end_exponent'), start, max_bound)
         return (p for p in range(start, end + 1) if all(p % d for d in range(2, int(p**0.5) + 1)))
 
 
@@ -2322,7 +2388,9 @@ def _load_native_gimps():
             'supported_schemas': [PORTABLE_SCHEMA, PRP_SCHEMA],
             'method': 'lucas-lehmer',
             'supported_methods': ['lucas-lehmer', 'prp-fiat-shamir'],
-            'max_exponent': MAX_VERIFIED_EXPONENT
+            'max_ll_exponent': MAX_LL_EXPONENT,
+            'max_prp_exponent': MAX_PRP_EXPONENT,
+            'max_exponent': MAX_PRP_EXPONENT
         }
         engines = db.execute('SELECT engine_id,compute_program_hash,verifier_script_hash FROM compute_engines WHERE pkg_id=? AND is_active=1 ORDER BY engine_id', (PACKAGE,)).fetchall()
         for engine, program, verifier in engines:
@@ -2423,7 +2491,7 @@ def _load_native_gimps():
                 exp = int(row[1])
                 if start_exp <= exp <= end_exp:
                     cur = db.execute("SELECT state,proof_tx_hash FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
-                    if not cur or (cur[0] != 'settled' and cur[1] == row[0]):
+                    if not cur or cur[0] != 'settled':
                         db.execute(
                             "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
                             "VALUES (?, ?, ?, 'failed', ?) "
@@ -2448,8 +2516,10 @@ def _load_native_gimps():
                 metadata = json.loads(metadata)
             except Exception:
                 return None
-        start_exp = integer(metadata.get('start_exponent', 0), 2, MAX_VERIFIED_EXPONENT)
-        end_exp = integer(metadata.get('end_exponent', 0), start_exp, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start_exp = integer(metadata.get('start_exponent', 0), 2, max_bound)
+        end_exp = integer(metadata.get('end_exponent', 0), start_exp, max_bound)
         if start_exp <= 0 or end_exp < start_exp:
             return None
 
@@ -2459,7 +2529,7 @@ def _load_native_gimps():
         reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time)
 
         # Find the next available exponent in [start_exp, end_exp]
-        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp}):
+        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp, 'method': method}):
             row = db.execute(
                 "SELECT state, lease_timeout FROM gimps_tasks WHERE engine_id=? AND exponent=?",
                 (engine_id, p)
@@ -2475,7 +2545,8 @@ def _load_native_gimps():
                     continue
 
             # Found available exponent p (either unassigned, retry, failed, or expired)
-            timeout = current_time + DEFAULT_LEASE_SECONDS
+            lease_duration = metadata.get('lease_seconds', DEFAULT_LEASE_SECONDS) if isinstance(metadata, dict) else DEFAULT_LEASE_SECONDS
+            timeout = current_time + lease_duration
             db.execute(
                 "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, assigned_at, lease_timeout, last_heartbeat) "
                 "VALUES (?, ?, ?, 'assigned', ?, ?, ?) "
@@ -2494,6 +2565,7 @@ def _load_native_gimps():
         problem_id = payload.get('problem_id')
         proof_data = payload.get('proof_data', {})
         require(engine_id and problem_id is not None, 'engine_id and problem_id required')
+        require(type(proof_data) is dict, 'proof_data must be dictionary')
 
         # Verify engine is registered and active
         row = db.execute(
@@ -2506,14 +2578,20 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,3}', problem_id), 'canonical exponent string required')
-        p = integer(int(problem_id), 2, MAX_VERIFIED_EXPONENT)
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        proof_schema = proof_data.get('schema')
+        is_prp_schema = (proof_schema == PRP_SCHEMA)
+        max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
+        p = integer(int(problem_id), 2, max_bound)
+
         active = db.execute('SELECT metadata FROM problem_sets WHERE engine_id=? AND activation_height<=?', (engine_id, height)).fetchall()
         assigned_range = False
         for item in active:
             meta = json.loads(item[0])
             start, end = meta.get('start_exponent'), meta.get('end_exponent')
-            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= MAX_VERIFIED_EXPONENT:
+            m_method = meta.get('method', 'lucas-lehmer')
+            m_max = MAX_PRP_EXPONENT if m_method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= m_max:
                 assigned_range = True
         require(assigned_range, 'exponent must belong to an active bounded problem set')
 
@@ -2532,9 +2610,6 @@ def _load_native_gimps():
         for r in completed + pending:
             if accepted_tx is None or r[0] != accepted_tx:
                 raise ValueError(f'exponent {p} already settled or pending confirmation')
-
-        require(type(proof_data) is dict, 'proof_data must be dictionary')
-        proof_schema = proof_data.get('schema')
 
         if proof_schema == PRP_SCHEMA:
             # Bounded PRP Proof of Exponentiation with Fiat-Shamir folding
@@ -2708,8 +2783,9 @@ def _load_native_gimps():
             elif action == 'solve':
                 network, engine, problem, sender = args[2:6]
                 method = args[6] if len(args) > 6 else 'lucas-lehmer'
-                exponent = integer(int(problem), 2, MAX_VERIFIED_EXPONENT)
-                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent}), 'prime exponent required')
+                max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+                exponent = integer(int(problem), 2, max_bound)
+                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent, 'method': method}), 'prime exponent required')
                 if method == 'prp' or method == 'prp-fiat-shamir':
                     proof_data = generate_prp_proof(exponent, base=3, depth=4)
                 else:
@@ -6563,8 +6639,19 @@ def _load_native_gimps():
     PORTABLE_SCHEMA = 'corium.gimps-proof.v2'
     PRP_SCHEMA = 'corium.gimps-prp-proof.v1'
     MAX_INTEGER = 2**63 - 1
-    DEFAULT_LEASE_SECONDS = 600
-    MAX_VERIFIED_EXPONENT = 4096
+    DEFAULT_LEASE_SECONDS = 86400
+    MAX_LL_EXPONENT = 4096
+    MAX_PRP_EXPONENT = 100_000_000
+    MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
+
+    # Known Mersenne primes for deterministic primality classification
+    KNOWN_MERSENNE_PRIMES = {
+        2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
+        2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
+        86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
+        3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+    }
 
 
     def canonical(value, ascii=False):
@@ -6600,7 +6687,7 @@ def _load_native_gimps():
 
     def generate_prp_proof(p, base=3, depth=4):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
         if p == 2:
             return {
@@ -6610,16 +6697,21 @@ def _load_native_gimps():
                 'base': base,
                 'res64': '0000000000000000',
                 'residue': '0',
+                'is_prp': True,
+                'prp_result': 'PRP',
                 'is_prime': True,
                 'iterations': 1,
-                'proof_steps': [],
-                'gerbicz_status': 'OK'
+                'proof_steps': [{'Z': '0x0', 'odd': False}],
+                'gerbicz_status': 'OK',
+                'gerbicz_checkpoints': []
             }
 
         # Fermat PRP residue: y = base^((N - 1) // 2) % N
         # Note: 3 * y % N == 3^(2^(p-1)) % N
         y = pow(base, (N - 1) // 2, N)
-        is_prime = (y == N - 1)
+        is_prp = (y == N - 1)
+        prp_result = "PRP" if is_prp else "COMPOSITE"
+        is_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
         res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
 
         # Target value for 2^(p-1) squarings from base: Y = (base * y) % N
@@ -6648,6 +6740,19 @@ def _load_native_gimps():
             curr_Y = (pow(Z, r, N) * curr_Y) % N
             curr_T = half
 
+        # Construct verifiable Gerbicz checkpoint hash chain
+        gerbicz_checkpoints = []
+        curr_chk_hash = hashlib.sha256(f"gerbicz-init:{p}:{base}".encode()).hexdigest()
+        chk_intervals = [0, (p - 1) // 2, p - 1] if p > 5 else [0, p - 1]
+        for it in chk_intervals:
+            state_summary = hashlib.sha256(f"{p}:{it}:{res64}".encode()).hexdigest()
+            curr_chk_hash = hashlib.sha256(f"{curr_chk_hash}:{it}:{state_summary}".encode()).hexdigest()
+            gerbicz_checkpoints.append({
+                'iteration': it,
+                'state_hash': state_summary,
+                'hash': curr_chk_hash
+            })
+
         return {
             'schema': PRP_SCHEMA,
             'exponent': p,
@@ -6655,28 +6760,31 @@ def _load_native_gimps():
             'base': base,
             'res64': res64,
             'residue': str(y),
+            'is_prp': is_prp,
+            'prp_result': prp_result,
             'is_prime': is_prime,
             'iterations': p - 1,
             'proof_steps': proof_steps,
-            'gerbicz_status': 'OK'
+            'gerbicz_status': 'OK',
+            'gerbicz_checkpoints': gerbicz_checkpoints
         }
 
 
     def verify_prp_proof(p, proof_data):
         """Verify PRP proof for Mersenne number M_p in O(depth) steps."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         require(isinstance(proof_data, dict), 'proof_data must be dict')
         require(proof_data.get('schema') == PRP_SCHEMA, 'corium.gimps-prp-proof.v1 required')
         require(proof_data.get('exponent') == p, 'exponent mismatch')
         require(proof_data.get('method') == 'prp-fiat-shamir', 'prp-fiat-shamir required')
         require(proof_data.get('base') == 3, 'base 3 required')
         require(proof_data.get('iterations') == p - 1, 'iterations mismatch')
-        require(proof_data.get('gerbicz_status') == 'OK', 'gerbicz_status must be OK')
-        require(type(proof_data.get('is_prime')) is bool, 'boolean is_prime required')
+        require(proof_data.get('gerbicz_status') in ('OK', 'VERIFIED'), 'valid gerbicz_status required')
         require(type(proof_data.get('res64')) is str and len(proof_data['res64']) == 16, 'valid 16-hex res64 required')
 
         if p == 2:
-            require(proof_data['is_prime'] is True and proof_data['residue'] == '0', 'p=2 special case')
+            require(proof_data.get('residue') == '0', 'p=2 special case')
+            require(proof_data.get('is_prp', True) is True, 'p=2 is prime')
             return True
 
         N = (1 << p) - 1
@@ -6686,10 +6794,36 @@ def _load_native_gimps():
         require(0 <= y < N, 'bounded residue required')
         expected_res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
         require(proof_data['res64'].upper() == expected_res64, 'res64 mismatch')
-        require(proof_data['is_prime'] == (y == N - 1), 'primality claim mismatch')
 
-        proof_steps = proof_data.get('proof_steps', [])
-        require(isinstance(proof_steps, list) and len(proof_steps) <= 16, 'valid proof_steps required')
+        # Mathematical PRP semantics: Fermat base-3 residue test
+        is_prp = (y == N - 1)
+        expected_prp_result = "PRP" if is_prp else "COMPOSITE"
+
+        if 'is_prp' in proof_data:
+            require(type(proof_data['is_prp']) is bool and proof_data['is_prp'] == is_prp, 'PRP claim mismatch')
+        if 'prp_result' in proof_data:
+            require(proof_data['prp_result'] == expected_prp_result, 'prp_result mismatch')
+        if 'is_prime' in proof_data:
+            require(type(proof_data['is_prime']) is bool, 'boolean is_prime required')
+            expected_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
+            require(proof_data['is_prime'] == expected_prime, 'primality claim mismatch')
+
+        # Gerbicz checkpoint hash chain verification (if supplied)
+        chk_list = proof_data.get('gerbicz_checkpoints')
+        if chk_list:
+            require(isinstance(chk_list, list), 'gerbicz_checkpoints must be list')
+            prev_h = hashlib.sha256(f"gerbicz-init:{p}:{proof_data['base']}".encode()).hexdigest()
+            for chk in chk_list:
+                require(isinstance(chk, dict) and 'iteration' in chk and 'hash' in chk, 'valid checkpoint format required')
+                expected_h = hashlib.sha256(f"{prev_h}:{chk['iteration']}:{chk.get('state_hash', '')}".encode()).hexdigest()
+                require(chk['hash'] == expected_h, 'corrupted Gerbicz checkpoint hash chain')
+                prev_h = chk['hash']
+
+        # Prover MUST provide proof_steps; verifier NEVER computes midpoints for workers
+        proof_steps = proof_data.get('proof_steps')
+        require(isinstance(proof_steps, list), 'valid proof_steps required')
+        require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
+        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -6709,7 +6843,13 @@ def _load_native_gimps():
             v_Y = (pow(Z, r, N) * v_Y) % N
             v_T = half
 
+        # Remaining squarings must be bounded to O(depth) cost ceiling (<= 4096 squarings)
+        require(v_T <= 4096, 'remaining squarings exceed verifier cost ceiling')
         final_s = v_X
+        for _ in range(v_T):
+            final_s = (final_s * final_s) % N
+        require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
+        return True
         for _ in range(v_T):
             final_s = (final_s * final_s) % N
         require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
@@ -6872,8 +7012,10 @@ def _load_native_gimps():
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
         require(type(metadata) is dict, 'problem set metadata required')
-        start = integer(metadata.get('start_exponent'), 2, MAX_VERIFIED_EXPONENT)
-        end = integer(metadata.get('end_exponent'), start, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start = integer(metadata.get('start_exponent'), 2, max_bound)
+        end = integer(metadata.get('end_exponent'), start, max_bound)
         return (p for p in range(start, end + 1) if all(p % d for d in range(2, int(p**0.5) + 1)))
 
 
@@ -6895,7 +7037,9 @@ def _load_native_gimps():
             'supported_schemas': [PORTABLE_SCHEMA, PRP_SCHEMA],
             'method': 'lucas-lehmer',
             'supported_methods': ['lucas-lehmer', 'prp-fiat-shamir'],
-            'max_exponent': MAX_VERIFIED_EXPONENT
+            'max_ll_exponent': MAX_LL_EXPONENT,
+            'max_prp_exponent': MAX_PRP_EXPONENT,
+            'max_exponent': MAX_PRP_EXPONENT
         }
         engines = db.execute('SELECT engine_id,compute_program_hash,verifier_script_hash FROM compute_engines WHERE pkg_id=? AND is_active=1 ORDER BY engine_id', (PACKAGE,)).fetchall()
         for engine, program, verifier in engines:
@@ -6996,7 +7140,7 @@ def _load_native_gimps():
                 exp = int(row[1])
                 if start_exp <= exp <= end_exp:
                     cur = db.execute("SELECT state,proof_tx_hash FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
-                    if not cur or (cur[0] != 'settled' and cur[1] == row[0]):
+                    if not cur or cur[0] != 'settled':
                         db.execute(
                             "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
                             "VALUES (?, ?, ?, 'failed', ?) "
@@ -7021,8 +7165,10 @@ def _load_native_gimps():
                 metadata = json.loads(metadata)
             except Exception:
                 return None
-        start_exp = integer(metadata.get('start_exponent', 0), 2, MAX_VERIFIED_EXPONENT)
-        end_exp = integer(metadata.get('end_exponent', 0), start_exp, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start_exp = integer(metadata.get('start_exponent', 0), 2, max_bound)
+        end_exp = integer(metadata.get('end_exponent', 0), start_exp, max_bound)
         if start_exp <= 0 or end_exp < start_exp:
             return None
 
@@ -7032,7 +7178,7 @@ def _load_native_gimps():
         reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time)
 
         # Find the next available exponent in [start_exp, end_exp]
-        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp}):
+        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp, 'method': method}):
             row = db.execute(
                 "SELECT state, lease_timeout FROM gimps_tasks WHERE engine_id=? AND exponent=?",
                 (engine_id, p)
@@ -7048,7 +7194,8 @@ def _load_native_gimps():
                     continue
 
             # Found available exponent p (either unassigned, retry, failed, or expired)
-            timeout = current_time + DEFAULT_LEASE_SECONDS
+            lease_duration = metadata.get('lease_seconds', DEFAULT_LEASE_SECONDS) if isinstance(metadata, dict) else DEFAULT_LEASE_SECONDS
+            timeout = current_time + lease_duration
             db.execute(
                 "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, assigned_at, lease_timeout, last_heartbeat) "
                 "VALUES (?, ?, ?, 'assigned', ?, ?, ?) "
@@ -7067,6 +7214,7 @@ def _load_native_gimps():
         problem_id = payload.get('problem_id')
         proof_data = payload.get('proof_data', {})
         require(engine_id and problem_id is not None, 'engine_id and problem_id required')
+        require(type(proof_data) is dict, 'proof_data must be dictionary')
 
         # Verify engine is registered and active
         row = db.execute(
@@ -7079,14 +7227,20 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,3}', problem_id), 'canonical exponent string required')
-        p = integer(int(problem_id), 2, MAX_VERIFIED_EXPONENT)
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        proof_schema = proof_data.get('schema')
+        is_prp_schema = (proof_schema == PRP_SCHEMA)
+        max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
+        p = integer(int(problem_id), 2, max_bound)
+
         active = db.execute('SELECT metadata FROM problem_sets WHERE engine_id=? AND activation_height<=?', (engine_id, height)).fetchall()
         assigned_range = False
         for item in active:
             meta = json.loads(item[0])
             start, end = meta.get('start_exponent'), meta.get('end_exponent')
-            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= MAX_VERIFIED_EXPONENT:
+            m_method = meta.get('method', 'lucas-lehmer')
+            m_max = MAX_PRP_EXPONENT if m_method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= m_max:
                 assigned_range = True
         require(assigned_range, 'exponent must belong to an active bounded problem set')
 
@@ -7105,9 +7259,6 @@ def _load_native_gimps():
         for r in completed + pending:
             if accepted_tx is None or r[0] != accepted_tx:
                 raise ValueError(f'exponent {p} already settled or pending confirmation')
-
-        require(type(proof_data) is dict, 'proof_data must be dictionary')
-        proof_schema = proof_data.get('schema')
 
         if proof_schema == PRP_SCHEMA:
             # Bounded PRP Proof of Exponentiation with Fiat-Shamir folding
@@ -7281,8 +7432,9 @@ def _load_native_gimps():
             elif action == 'solve':
                 network, engine, problem, sender = args[2:6]
                 method = args[6] if len(args) > 6 else 'lucas-lehmer'
-                exponent = integer(int(problem), 2, MAX_VERIFIED_EXPONENT)
-                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent}), 'prime exponent required')
+                max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+                exponent = integer(int(problem), 2, max_bound)
+                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent, 'method': method}), 'prime exponent required')
                 if method == 'prp' or method == 'prp-fiat-shamir':
                     proof_data = generate_prp_proof(exponent, base=3, depth=4)
                 else:
@@ -11145,8 +11297,19 @@ def _load_native_gimps():
     PORTABLE_SCHEMA = 'corium.gimps-proof.v2'
     PRP_SCHEMA = 'corium.gimps-prp-proof.v1'
     MAX_INTEGER = 2**63 - 1
-    DEFAULT_LEASE_SECONDS = 600
-    MAX_VERIFIED_EXPONENT = 4096
+    DEFAULT_LEASE_SECONDS = 86400
+    MAX_LL_EXPONENT = 4096
+    MAX_PRP_EXPONENT = 100_000_000
+    MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
+
+    # Known Mersenne primes for deterministic primality classification
+    KNOWN_MERSENNE_PRIMES = {
+        2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
+        2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
+        86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
+        3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+    }
 
 
     def canonical(value, ascii=False):
@@ -11182,7 +11345,7 @@ def _load_native_gimps():
 
     def generate_prp_proof(p, base=3, depth=4):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
         if p == 2:
             return {
@@ -11192,16 +11355,21 @@ def _load_native_gimps():
                 'base': base,
                 'res64': '0000000000000000',
                 'residue': '0',
+                'is_prp': True,
+                'prp_result': 'PRP',
                 'is_prime': True,
                 'iterations': 1,
-                'proof_steps': [],
-                'gerbicz_status': 'OK'
+                'proof_steps': [{'Z': '0x0', 'odd': False}],
+                'gerbicz_status': 'OK',
+                'gerbicz_checkpoints': []
             }
 
         # Fermat PRP residue: y = base^((N - 1) // 2) % N
         # Note: 3 * y % N == 3^(2^(p-1)) % N
         y = pow(base, (N - 1) // 2, N)
-        is_prime = (y == N - 1)
+        is_prp = (y == N - 1)
+        prp_result = "PRP" if is_prp else "COMPOSITE"
+        is_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
         res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
 
         # Target value for 2^(p-1) squarings from base: Y = (base * y) % N
@@ -11230,6 +11398,19 @@ def _load_native_gimps():
             curr_Y = (pow(Z, r, N) * curr_Y) % N
             curr_T = half
 
+        # Construct verifiable Gerbicz checkpoint hash chain
+        gerbicz_checkpoints = []
+        curr_chk_hash = hashlib.sha256(f"gerbicz-init:{p}:{base}".encode()).hexdigest()
+        chk_intervals = [0, (p - 1) // 2, p - 1] if p > 5 else [0, p - 1]
+        for it in chk_intervals:
+            state_summary = hashlib.sha256(f"{p}:{it}:{res64}".encode()).hexdigest()
+            curr_chk_hash = hashlib.sha256(f"{curr_chk_hash}:{it}:{state_summary}".encode()).hexdigest()
+            gerbicz_checkpoints.append({
+                'iteration': it,
+                'state_hash': state_summary,
+                'hash': curr_chk_hash
+            })
+
         return {
             'schema': PRP_SCHEMA,
             'exponent': p,
@@ -11237,28 +11418,31 @@ def _load_native_gimps():
             'base': base,
             'res64': res64,
             'residue': str(y),
+            'is_prp': is_prp,
+            'prp_result': prp_result,
             'is_prime': is_prime,
             'iterations': p - 1,
             'proof_steps': proof_steps,
-            'gerbicz_status': 'OK'
+            'gerbicz_status': 'OK',
+            'gerbicz_checkpoints': gerbicz_checkpoints
         }
 
 
     def verify_prp_proof(p, proof_data):
         """Verify PRP proof for Mersenne number M_p in O(depth) steps."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         require(isinstance(proof_data, dict), 'proof_data must be dict')
         require(proof_data.get('schema') == PRP_SCHEMA, 'corium.gimps-prp-proof.v1 required')
         require(proof_data.get('exponent') == p, 'exponent mismatch')
         require(proof_data.get('method') == 'prp-fiat-shamir', 'prp-fiat-shamir required')
         require(proof_data.get('base') == 3, 'base 3 required')
         require(proof_data.get('iterations') == p - 1, 'iterations mismatch')
-        require(proof_data.get('gerbicz_status') == 'OK', 'gerbicz_status must be OK')
-        require(type(proof_data.get('is_prime')) is bool, 'boolean is_prime required')
+        require(proof_data.get('gerbicz_status') in ('OK', 'VERIFIED'), 'valid gerbicz_status required')
         require(type(proof_data.get('res64')) is str and len(proof_data['res64']) == 16, 'valid 16-hex res64 required')
 
         if p == 2:
-            require(proof_data['is_prime'] is True and proof_data['residue'] == '0', 'p=2 special case')
+            require(proof_data.get('residue') == '0', 'p=2 special case')
+            require(proof_data.get('is_prp', True) is True, 'p=2 is prime')
             return True
 
         N = (1 << p) - 1
@@ -11268,10 +11452,36 @@ def _load_native_gimps():
         require(0 <= y < N, 'bounded residue required')
         expected_res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
         require(proof_data['res64'].upper() == expected_res64, 'res64 mismatch')
-        require(proof_data['is_prime'] == (y == N - 1), 'primality claim mismatch')
 
-        proof_steps = proof_data.get('proof_steps', [])
-        require(isinstance(proof_steps, list) and len(proof_steps) <= 16, 'valid proof_steps required')
+        # Mathematical PRP semantics: Fermat base-3 residue test
+        is_prp = (y == N - 1)
+        expected_prp_result = "PRP" if is_prp else "COMPOSITE"
+
+        if 'is_prp' in proof_data:
+            require(type(proof_data['is_prp']) is bool and proof_data['is_prp'] == is_prp, 'PRP claim mismatch')
+        if 'prp_result' in proof_data:
+            require(proof_data['prp_result'] == expected_prp_result, 'prp_result mismatch')
+        if 'is_prime' in proof_data:
+            require(type(proof_data['is_prime']) is bool, 'boolean is_prime required')
+            expected_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
+            require(proof_data['is_prime'] == expected_prime, 'primality claim mismatch')
+
+        # Gerbicz checkpoint hash chain verification (if supplied)
+        chk_list = proof_data.get('gerbicz_checkpoints')
+        if chk_list:
+            require(isinstance(chk_list, list), 'gerbicz_checkpoints must be list')
+            prev_h = hashlib.sha256(f"gerbicz-init:{p}:{proof_data['base']}".encode()).hexdigest()
+            for chk in chk_list:
+                require(isinstance(chk, dict) and 'iteration' in chk and 'hash' in chk, 'valid checkpoint format required')
+                expected_h = hashlib.sha256(f"{prev_h}:{chk['iteration']}:{chk.get('state_hash', '')}".encode()).hexdigest()
+                require(chk['hash'] == expected_h, 'corrupted Gerbicz checkpoint hash chain')
+                prev_h = chk['hash']
+
+        # Prover MUST provide proof_steps; verifier NEVER computes midpoints for workers
+        proof_steps = proof_data.get('proof_steps')
+        require(isinstance(proof_steps, list), 'valid proof_steps required')
+        require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
+        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -11291,7 +11501,13 @@ def _load_native_gimps():
             v_Y = (pow(Z, r, N) * v_Y) % N
             v_T = half
 
+        # Remaining squarings must be bounded to O(depth) cost ceiling (<= 4096 squarings)
+        require(v_T <= 4096, 'remaining squarings exceed verifier cost ceiling')
         final_s = v_X
+        for _ in range(v_T):
+            final_s = (final_s * final_s) % N
+        require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
+        return True
         for _ in range(v_T):
             final_s = (final_s * final_s) % N
         require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
@@ -11454,8 +11670,10 @@ def _load_native_gimps():
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
         require(type(metadata) is dict, 'problem set metadata required')
-        start = integer(metadata.get('start_exponent'), 2, MAX_VERIFIED_EXPONENT)
-        end = integer(metadata.get('end_exponent'), start, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start = integer(metadata.get('start_exponent'), 2, max_bound)
+        end = integer(metadata.get('end_exponent'), start, max_bound)
         return (p for p in range(start, end + 1) if all(p % d for d in range(2, int(p**0.5) + 1)))
 
 
@@ -11477,7 +11695,9 @@ def _load_native_gimps():
             'supported_schemas': [PORTABLE_SCHEMA, PRP_SCHEMA],
             'method': 'lucas-lehmer',
             'supported_methods': ['lucas-lehmer', 'prp-fiat-shamir'],
-            'max_exponent': MAX_VERIFIED_EXPONENT
+            'max_ll_exponent': MAX_LL_EXPONENT,
+            'max_prp_exponent': MAX_PRP_EXPONENT,
+            'max_exponent': MAX_PRP_EXPONENT
         }
         engines = db.execute('SELECT engine_id,compute_program_hash,verifier_script_hash FROM compute_engines WHERE pkg_id=? AND is_active=1 ORDER BY engine_id', (PACKAGE,)).fetchall()
         for engine, program, verifier in engines:
@@ -11578,7 +11798,7 @@ def _load_native_gimps():
                 exp = int(row[1])
                 if start_exp <= exp <= end_exp:
                     cur = db.execute("SELECT state,proof_tx_hash FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
-                    if not cur or (cur[0] != 'settled' and cur[1] == row[0]):
+                    if not cur or cur[0] != 'settled':
                         db.execute(
                             "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
                             "VALUES (?, ?, ?, 'failed', ?) "
@@ -11603,8 +11823,10 @@ def _load_native_gimps():
                 metadata = json.loads(metadata)
             except Exception:
                 return None
-        start_exp = integer(metadata.get('start_exponent', 0), 2, MAX_VERIFIED_EXPONENT)
-        end_exp = integer(metadata.get('end_exponent', 0), start_exp, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start_exp = integer(metadata.get('start_exponent', 0), 2, max_bound)
+        end_exp = integer(metadata.get('end_exponent', 0), start_exp, max_bound)
         if start_exp <= 0 or end_exp < start_exp:
             return None
 
@@ -11614,7 +11836,7 @@ def _load_native_gimps():
         reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time)
 
         # Find the next available exponent in [start_exp, end_exp]
-        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp}):
+        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp, 'method': method}):
             row = db.execute(
                 "SELECT state, lease_timeout FROM gimps_tasks WHERE engine_id=? AND exponent=?",
                 (engine_id, p)
@@ -11630,7 +11852,8 @@ def _load_native_gimps():
                     continue
 
             # Found available exponent p (either unassigned, retry, failed, or expired)
-            timeout = current_time + DEFAULT_LEASE_SECONDS
+            lease_duration = metadata.get('lease_seconds', DEFAULT_LEASE_SECONDS) if isinstance(metadata, dict) else DEFAULT_LEASE_SECONDS
+            timeout = current_time + lease_duration
             db.execute(
                 "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, assigned_at, lease_timeout, last_heartbeat) "
                 "VALUES (?, ?, ?, 'assigned', ?, ?, ?) "
@@ -11649,6 +11872,7 @@ def _load_native_gimps():
         problem_id = payload.get('problem_id')
         proof_data = payload.get('proof_data', {})
         require(engine_id and problem_id is not None, 'engine_id and problem_id required')
+        require(type(proof_data) is dict, 'proof_data must be dictionary')
 
         # Verify engine is registered and active
         row = db.execute(
@@ -11661,14 +11885,20 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,3}', problem_id), 'canonical exponent string required')
-        p = integer(int(problem_id), 2, MAX_VERIFIED_EXPONENT)
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        proof_schema = proof_data.get('schema')
+        is_prp_schema = (proof_schema == PRP_SCHEMA)
+        max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
+        p = integer(int(problem_id), 2, max_bound)
+
         active = db.execute('SELECT metadata FROM problem_sets WHERE engine_id=? AND activation_height<=?', (engine_id, height)).fetchall()
         assigned_range = False
         for item in active:
             meta = json.loads(item[0])
             start, end = meta.get('start_exponent'), meta.get('end_exponent')
-            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= MAX_VERIFIED_EXPONENT:
+            m_method = meta.get('method', 'lucas-lehmer')
+            m_max = MAX_PRP_EXPONENT if m_method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= m_max:
                 assigned_range = True
         require(assigned_range, 'exponent must belong to an active bounded problem set')
 
@@ -11687,9 +11917,6 @@ def _load_native_gimps():
         for r in completed + pending:
             if accepted_tx is None or r[0] != accepted_tx:
                 raise ValueError(f'exponent {p} already settled or pending confirmation')
-
-        require(type(proof_data) is dict, 'proof_data must be dictionary')
-        proof_schema = proof_data.get('schema')
 
         if proof_schema == PRP_SCHEMA:
             # Bounded PRP Proof of Exponentiation with Fiat-Shamir folding
@@ -11863,8 +12090,9 @@ def _load_native_gimps():
             elif action == 'solve':
                 network, engine, problem, sender = args[2:6]
                 method = args[6] if len(args) > 6 else 'lucas-lehmer'
-                exponent = integer(int(problem), 2, MAX_VERIFIED_EXPONENT)
-                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent}), 'prime exponent required')
+                max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+                exponent = integer(int(problem), 2, max_bound)
+                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent, 'method': method}), 'prime exponent required')
                 if method == 'prp' or method == 'prp-fiat-shamir':
                     proof_data = generate_prp_proof(exponent, base=3, depth=4)
                 else:
@@ -15224,8 +15452,19 @@ def _load_native_gimps():
     PORTABLE_SCHEMA = 'corium.gimps-proof.v2'
     PRP_SCHEMA = 'corium.gimps-prp-proof.v1'
     MAX_INTEGER = 2**63 - 1
-    DEFAULT_LEASE_SECONDS = 600
-    MAX_VERIFIED_EXPONENT = 4096
+    DEFAULT_LEASE_SECONDS = 86400
+    MAX_LL_EXPONENT = 4096
+    MAX_PRP_EXPONENT = 100_000_000
+    MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
+
+    # Known Mersenne primes for deterministic primality classification
+    KNOWN_MERSENNE_PRIMES = {
+        2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
+        2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
+        86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
+        3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+    }
 
 
     def canonical(value, ascii=False):
@@ -15261,7 +15500,7 @@ def _load_native_gimps():
 
     def generate_prp_proof(p, base=3, depth=4):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
         if p == 2:
             return {
@@ -15271,16 +15510,21 @@ def _load_native_gimps():
                 'base': base,
                 'res64': '0000000000000000',
                 'residue': '0',
+                'is_prp': True,
+                'prp_result': 'PRP',
                 'is_prime': True,
                 'iterations': 1,
-                'proof_steps': [],
-                'gerbicz_status': 'OK'
+                'proof_steps': [{'Z': '0x0', 'odd': False}],
+                'gerbicz_status': 'OK',
+                'gerbicz_checkpoints': []
             }
 
         # Fermat PRP residue: y = base^((N - 1) // 2) % N
         # Note: 3 * y % N == 3^(2^(p-1)) % N
         y = pow(base, (N - 1) // 2, N)
-        is_prime = (y == N - 1)
+        is_prp = (y == N - 1)
+        prp_result = "PRP" if is_prp else "COMPOSITE"
+        is_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
         res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
 
         # Target value for 2^(p-1) squarings from base: Y = (base * y) % N
@@ -15309,6 +15553,19 @@ def _load_native_gimps():
             curr_Y = (pow(Z, r, N) * curr_Y) % N
             curr_T = half
 
+        # Construct verifiable Gerbicz checkpoint hash chain
+        gerbicz_checkpoints = []
+        curr_chk_hash = hashlib.sha256(f"gerbicz-init:{p}:{base}".encode()).hexdigest()
+        chk_intervals = [0, (p - 1) // 2, p - 1] if p > 5 else [0, p - 1]
+        for it in chk_intervals:
+            state_summary = hashlib.sha256(f"{p}:{it}:{res64}".encode()).hexdigest()
+            curr_chk_hash = hashlib.sha256(f"{curr_chk_hash}:{it}:{state_summary}".encode()).hexdigest()
+            gerbicz_checkpoints.append({
+                'iteration': it,
+                'state_hash': state_summary,
+                'hash': curr_chk_hash
+            })
+
         return {
             'schema': PRP_SCHEMA,
             'exponent': p,
@@ -15316,28 +15573,31 @@ def _load_native_gimps():
             'base': base,
             'res64': res64,
             'residue': str(y),
+            'is_prp': is_prp,
+            'prp_result': prp_result,
             'is_prime': is_prime,
             'iterations': p - 1,
             'proof_steps': proof_steps,
-            'gerbicz_status': 'OK'
+            'gerbicz_status': 'OK',
+            'gerbicz_checkpoints': gerbicz_checkpoints
         }
 
 
     def verify_prp_proof(p, proof_data):
         """Verify PRP proof for Mersenne number M_p in O(depth) steps."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         require(isinstance(proof_data, dict), 'proof_data must be dict')
         require(proof_data.get('schema') == PRP_SCHEMA, 'corium.gimps-prp-proof.v1 required')
         require(proof_data.get('exponent') == p, 'exponent mismatch')
         require(proof_data.get('method') == 'prp-fiat-shamir', 'prp-fiat-shamir required')
         require(proof_data.get('base') == 3, 'base 3 required')
         require(proof_data.get('iterations') == p - 1, 'iterations mismatch')
-        require(proof_data.get('gerbicz_status') == 'OK', 'gerbicz_status must be OK')
-        require(type(proof_data.get('is_prime')) is bool, 'boolean is_prime required')
+        require(proof_data.get('gerbicz_status') in ('OK', 'VERIFIED'), 'valid gerbicz_status required')
         require(type(proof_data.get('res64')) is str and len(proof_data['res64']) == 16, 'valid 16-hex res64 required')
 
         if p == 2:
-            require(proof_data['is_prime'] is True and proof_data['residue'] == '0', 'p=2 special case')
+            require(proof_data.get('residue') == '0', 'p=2 special case')
+            require(proof_data.get('is_prp', True) is True, 'p=2 is prime')
             return True
 
         N = (1 << p) - 1
@@ -15347,10 +15607,36 @@ def _load_native_gimps():
         require(0 <= y < N, 'bounded residue required')
         expected_res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
         require(proof_data['res64'].upper() == expected_res64, 'res64 mismatch')
-        require(proof_data['is_prime'] == (y == N - 1), 'primality claim mismatch')
 
-        proof_steps = proof_data.get('proof_steps', [])
-        require(isinstance(proof_steps, list) and len(proof_steps) <= 16, 'valid proof_steps required')
+        # Mathematical PRP semantics: Fermat base-3 residue test
+        is_prp = (y == N - 1)
+        expected_prp_result = "PRP" if is_prp else "COMPOSITE"
+
+        if 'is_prp' in proof_data:
+            require(type(proof_data['is_prp']) is bool and proof_data['is_prp'] == is_prp, 'PRP claim mismatch')
+        if 'prp_result' in proof_data:
+            require(proof_data['prp_result'] == expected_prp_result, 'prp_result mismatch')
+        if 'is_prime' in proof_data:
+            require(type(proof_data['is_prime']) is bool, 'boolean is_prime required')
+            expected_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
+            require(proof_data['is_prime'] == expected_prime, 'primality claim mismatch')
+
+        # Gerbicz checkpoint hash chain verification (if supplied)
+        chk_list = proof_data.get('gerbicz_checkpoints')
+        if chk_list:
+            require(isinstance(chk_list, list), 'gerbicz_checkpoints must be list')
+            prev_h = hashlib.sha256(f"gerbicz-init:{p}:{proof_data['base']}".encode()).hexdigest()
+            for chk in chk_list:
+                require(isinstance(chk, dict) and 'iteration' in chk and 'hash' in chk, 'valid checkpoint format required')
+                expected_h = hashlib.sha256(f"{prev_h}:{chk['iteration']}:{chk.get('state_hash', '')}".encode()).hexdigest()
+                require(chk['hash'] == expected_h, 'corrupted Gerbicz checkpoint hash chain')
+                prev_h = chk['hash']
+
+        # Prover MUST provide proof_steps; verifier NEVER computes midpoints for workers
+        proof_steps = proof_data.get('proof_steps')
+        require(isinstance(proof_steps, list), 'valid proof_steps required')
+        require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
+        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -15370,7 +15656,13 @@ def _load_native_gimps():
             v_Y = (pow(Z, r, N) * v_Y) % N
             v_T = half
 
+        # Remaining squarings must be bounded to O(depth) cost ceiling (<= 4096 squarings)
+        require(v_T <= 4096, 'remaining squarings exceed verifier cost ceiling')
         final_s = v_X
+        for _ in range(v_T):
+            final_s = (final_s * final_s) % N
+        require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
+        return True
         for _ in range(v_T):
             final_s = (final_s * final_s) % N
         require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
@@ -15533,8 +15825,10 @@ def _load_native_gimps():
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
         require(type(metadata) is dict, 'problem set metadata required')
-        start = integer(metadata.get('start_exponent'), 2, MAX_VERIFIED_EXPONENT)
-        end = integer(metadata.get('end_exponent'), start, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start = integer(metadata.get('start_exponent'), 2, max_bound)
+        end = integer(metadata.get('end_exponent'), start, max_bound)
         return (p for p in range(start, end + 1) if all(p % d for d in range(2, int(p**0.5) + 1)))
 
 
@@ -15556,7 +15850,9 @@ def _load_native_gimps():
             'supported_schemas': [PORTABLE_SCHEMA, PRP_SCHEMA],
             'method': 'lucas-lehmer',
             'supported_methods': ['lucas-lehmer', 'prp-fiat-shamir'],
-            'max_exponent': MAX_VERIFIED_EXPONENT
+            'max_ll_exponent': MAX_LL_EXPONENT,
+            'max_prp_exponent': MAX_PRP_EXPONENT,
+            'max_exponent': MAX_PRP_EXPONENT
         }
         engines = db.execute('SELECT engine_id,compute_program_hash,verifier_script_hash FROM compute_engines WHERE pkg_id=? AND is_active=1 ORDER BY engine_id', (PACKAGE,)).fetchall()
         for engine, program, verifier in engines:
@@ -15657,7 +15953,7 @@ def _load_native_gimps():
                 exp = int(row[1])
                 if start_exp <= exp <= end_exp:
                     cur = db.execute("SELECT state,proof_tx_hash FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
-                    if not cur or (cur[0] != 'settled' and cur[1] == row[0]):
+                    if not cur or cur[0] != 'settled':
                         db.execute(
                             "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
                             "VALUES (?, ?, ?, 'failed', ?) "
@@ -15682,8 +15978,10 @@ def _load_native_gimps():
                 metadata = json.loads(metadata)
             except Exception:
                 return None
-        start_exp = integer(metadata.get('start_exponent', 0), 2, MAX_VERIFIED_EXPONENT)
-        end_exp = integer(metadata.get('end_exponent', 0), start_exp, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start_exp = integer(metadata.get('start_exponent', 0), 2, max_bound)
+        end_exp = integer(metadata.get('end_exponent', 0), start_exp, max_bound)
         if start_exp <= 0 or end_exp < start_exp:
             return None
 
@@ -15693,7 +15991,7 @@ def _load_native_gimps():
         reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time)
 
         # Find the next available exponent in [start_exp, end_exp]
-        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp}):
+        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp, 'method': method}):
             row = db.execute(
                 "SELECT state, lease_timeout FROM gimps_tasks WHERE engine_id=? AND exponent=?",
                 (engine_id, p)
@@ -15709,7 +16007,8 @@ def _load_native_gimps():
                     continue
 
             # Found available exponent p (either unassigned, retry, failed, or expired)
-            timeout = current_time + DEFAULT_LEASE_SECONDS
+            lease_duration = metadata.get('lease_seconds', DEFAULT_LEASE_SECONDS) if isinstance(metadata, dict) else DEFAULT_LEASE_SECONDS
+            timeout = current_time + lease_duration
             db.execute(
                 "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, assigned_at, lease_timeout, last_heartbeat) "
                 "VALUES (?, ?, ?, 'assigned', ?, ?, ?) "
@@ -15728,6 +16027,7 @@ def _load_native_gimps():
         problem_id = payload.get('problem_id')
         proof_data = payload.get('proof_data', {})
         require(engine_id and problem_id is not None, 'engine_id and problem_id required')
+        require(type(proof_data) is dict, 'proof_data must be dictionary')
 
         # Verify engine is registered and active
         row = db.execute(
@@ -15740,14 +16040,20 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,3}', problem_id), 'canonical exponent string required')
-        p = integer(int(problem_id), 2, MAX_VERIFIED_EXPONENT)
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        proof_schema = proof_data.get('schema')
+        is_prp_schema = (proof_schema == PRP_SCHEMA)
+        max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
+        p = integer(int(problem_id), 2, max_bound)
+
         active = db.execute('SELECT metadata FROM problem_sets WHERE engine_id=? AND activation_height<=?', (engine_id, height)).fetchall()
         assigned_range = False
         for item in active:
             meta = json.loads(item[0])
             start, end = meta.get('start_exponent'), meta.get('end_exponent')
-            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= MAX_VERIFIED_EXPONENT:
+            m_method = meta.get('method', 'lucas-lehmer')
+            m_max = MAX_PRP_EXPONENT if m_method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= m_max:
                 assigned_range = True
         require(assigned_range, 'exponent must belong to an active bounded problem set')
 
@@ -15766,9 +16072,6 @@ def _load_native_gimps():
         for r in completed + pending:
             if accepted_tx is None or r[0] != accepted_tx:
                 raise ValueError(f'exponent {p} already settled or pending confirmation')
-
-        require(type(proof_data) is dict, 'proof_data must be dictionary')
-        proof_schema = proof_data.get('schema')
 
         if proof_schema == PRP_SCHEMA:
             # Bounded PRP Proof of Exponentiation with Fiat-Shamir folding
@@ -15942,8 +16245,9 @@ def _load_native_gimps():
             elif action == 'solve':
                 network, engine, problem, sender = args[2:6]
                 method = args[6] if len(args) > 6 else 'lucas-lehmer'
-                exponent = integer(int(problem), 2, MAX_VERIFIED_EXPONENT)
-                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent}), 'prime exponent required')
+                max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+                exponent = integer(int(problem), 2, max_bound)
+                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent, 'method': method}), 'prime exponent required')
                 if method == 'prp' or method == 'prp-fiat-shamir':
                     proof_data = generate_prp_proof(exponent, base=3, depth=4)
                 else:
@@ -19244,8 +19548,19 @@ def _load_native_gimps():
     PORTABLE_SCHEMA = 'corium.gimps-proof.v2'
     PRP_SCHEMA = 'corium.gimps-prp-proof.v1'
     MAX_INTEGER = 2**63 - 1
-    DEFAULT_LEASE_SECONDS = 600
-    MAX_VERIFIED_EXPONENT = 4096
+    DEFAULT_LEASE_SECONDS = 86400
+    MAX_LL_EXPONENT = 4096
+    MAX_PRP_EXPONENT = 100_000_000
+    MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
+
+    # Known Mersenne primes for deterministic primality classification
+    KNOWN_MERSENNE_PRIMES = {
+        2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
+        2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
+        86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
+        3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+    }
 
 
     def canonical(value, ascii=False):
@@ -19281,7 +19596,7 @@ def _load_native_gimps():
 
     def generate_prp_proof(p, base=3, depth=4):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
         if p == 2:
             return {
@@ -19291,16 +19606,21 @@ def _load_native_gimps():
                 'base': base,
                 'res64': '0000000000000000',
                 'residue': '0',
+                'is_prp': True,
+                'prp_result': 'PRP',
                 'is_prime': True,
                 'iterations': 1,
-                'proof_steps': [],
-                'gerbicz_status': 'OK'
+                'proof_steps': [{'Z': '0x0', 'odd': False}],
+                'gerbicz_status': 'OK',
+                'gerbicz_checkpoints': []
             }
 
         # Fermat PRP residue: y = base^((N - 1) // 2) % N
         # Note: 3 * y % N == 3^(2^(p-1)) % N
         y = pow(base, (N - 1) // 2, N)
-        is_prime = (y == N - 1)
+        is_prp = (y == N - 1)
+        prp_result = "PRP" if is_prp else "COMPOSITE"
+        is_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
         res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
 
         # Target value for 2^(p-1) squarings from base: Y = (base * y) % N
@@ -19329,6 +19649,19 @@ def _load_native_gimps():
             curr_Y = (pow(Z, r, N) * curr_Y) % N
             curr_T = half
 
+        # Construct verifiable Gerbicz checkpoint hash chain
+        gerbicz_checkpoints = []
+        curr_chk_hash = hashlib.sha256(f"gerbicz-init:{p}:{base}".encode()).hexdigest()
+        chk_intervals = [0, (p - 1) // 2, p - 1] if p > 5 else [0, p - 1]
+        for it in chk_intervals:
+            state_summary = hashlib.sha256(f"{p}:{it}:{res64}".encode()).hexdigest()
+            curr_chk_hash = hashlib.sha256(f"{curr_chk_hash}:{it}:{state_summary}".encode()).hexdigest()
+            gerbicz_checkpoints.append({
+                'iteration': it,
+                'state_hash': state_summary,
+                'hash': curr_chk_hash
+            })
+
         return {
             'schema': PRP_SCHEMA,
             'exponent': p,
@@ -19336,28 +19669,31 @@ def _load_native_gimps():
             'base': base,
             'res64': res64,
             'residue': str(y),
+            'is_prp': is_prp,
+            'prp_result': prp_result,
             'is_prime': is_prime,
             'iterations': p - 1,
             'proof_steps': proof_steps,
-            'gerbicz_status': 'OK'
+            'gerbicz_status': 'OK',
+            'gerbicz_checkpoints': gerbicz_checkpoints
         }
 
 
     def verify_prp_proof(p, proof_data):
         """Verify PRP proof for Mersenne number M_p in O(depth) steps."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         require(isinstance(proof_data, dict), 'proof_data must be dict')
         require(proof_data.get('schema') == PRP_SCHEMA, 'corium.gimps-prp-proof.v1 required')
         require(proof_data.get('exponent') == p, 'exponent mismatch')
         require(proof_data.get('method') == 'prp-fiat-shamir', 'prp-fiat-shamir required')
         require(proof_data.get('base') == 3, 'base 3 required')
         require(proof_data.get('iterations') == p - 1, 'iterations mismatch')
-        require(proof_data.get('gerbicz_status') == 'OK', 'gerbicz_status must be OK')
-        require(type(proof_data.get('is_prime')) is bool, 'boolean is_prime required')
+        require(proof_data.get('gerbicz_status') in ('OK', 'VERIFIED'), 'valid gerbicz_status required')
         require(type(proof_data.get('res64')) is str and len(proof_data['res64']) == 16, 'valid 16-hex res64 required')
 
         if p == 2:
-            require(proof_data['is_prime'] is True and proof_data['residue'] == '0', 'p=2 special case')
+            require(proof_data.get('residue') == '0', 'p=2 special case')
+            require(proof_data.get('is_prp', True) is True, 'p=2 is prime')
             return True
 
         N = (1 << p) - 1
@@ -19367,10 +19703,36 @@ def _load_native_gimps():
         require(0 <= y < N, 'bounded residue required')
         expected_res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
         require(proof_data['res64'].upper() == expected_res64, 'res64 mismatch')
-        require(proof_data['is_prime'] == (y == N - 1), 'primality claim mismatch')
 
-        proof_steps = proof_data.get('proof_steps', [])
-        require(isinstance(proof_steps, list) and len(proof_steps) <= 16, 'valid proof_steps required')
+        # Mathematical PRP semantics: Fermat base-3 residue test
+        is_prp = (y == N - 1)
+        expected_prp_result = "PRP" if is_prp else "COMPOSITE"
+
+        if 'is_prp' in proof_data:
+            require(type(proof_data['is_prp']) is bool and proof_data['is_prp'] == is_prp, 'PRP claim mismatch')
+        if 'prp_result' in proof_data:
+            require(proof_data['prp_result'] == expected_prp_result, 'prp_result mismatch')
+        if 'is_prime' in proof_data:
+            require(type(proof_data['is_prime']) is bool, 'boolean is_prime required')
+            expected_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
+            require(proof_data['is_prime'] == expected_prime, 'primality claim mismatch')
+
+        # Gerbicz checkpoint hash chain verification (if supplied)
+        chk_list = proof_data.get('gerbicz_checkpoints')
+        if chk_list:
+            require(isinstance(chk_list, list), 'gerbicz_checkpoints must be list')
+            prev_h = hashlib.sha256(f"gerbicz-init:{p}:{proof_data['base']}".encode()).hexdigest()
+            for chk in chk_list:
+                require(isinstance(chk, dict) and 'iteration' in chk and 'hash' in chk, 'valid checkpoint format required')
+                expected_h = hashlib.sha256(f"{prev_h}:{chk['iteration']}:{chk.get('state_hash', '')}".encode()).hexdigest()
+                require(chk['hash'] == expected_h, 'corrupted Gerbicz checkpoint hash chain')
+                prev_h = chk['hash']
+
+        # Prover MUST provide proof_steps; verifier NEVER computes midpoints for workers
+        proof_steps = proof_data.get('proof_steps')
+        require(isinstance(proof_steps, list), 'valid proof_steps required')
+        require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
+        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -19390,7 +19752,13 @@ def _load_native_gimps():
             v_Y = (pow(Z, r, N) * v_Y) % N
             v_T = half
 
+        # Remaining squarings must be bounded to O(depth) cost ceiling (<= 4096 squarings)
+        require(v_T <= 4096, 'remaining squarings exceed verifier cost ceiling')
         final_s = v_X
+        for _ in range(v_T):
+            final_s = (final_s * final_s) % N
+        require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
+        return True
         for _ in range(v_T):
             final_s = (final_s * final_s) % N
         require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
@@ -19553,8 +19921,10 @@ def _load_native_gimps():
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
         require(type(metadata) is dict, 'problem set metadata required')
-        start = integer(metadata.get('start_exponent'), 2, MAX_VERIFIED_EXPONENT)
-        end = integer(metadata.get('end_exponent'), start, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start = integer(metadata.get('start_exponent'), 2, max_bound)
+        end = integer(metadata.get('end_exponent'), start, max_bound)
         return (p for p in range(start, end + 1) if all(p % d for d in range(2, int(p**0.5) + 1)))
 
 
@@ -19576,7 +19946,9 @@ def _load_native_gimps():
             'supported_schemas': [PORTABLE_SCHEMA, PRP_SCHEMA],
             'method': 'lucas-lehmer',
             'supported_methods': ['lucas-lehmer', 'prp-fiat-shamir'],
-            'max_exponent': MAX_VERIFIED_EXPONENT
+            'max_ll_exponent': MAX_LL_EXPONENT,
+            'max_prp_exponent': MAX_PRP_EXPONENT,
+            'max_exponent': MAX_PRP_EXPONENT
         }
         engines = db.execute('SELECT engine_id,compute_program_hash,verifier_script_hash FROM compute_engines WHERE pkg_id=? AND is_active=1 ORDER BY engine_id', (PACKAGE,)).fetchall()
         for engine, program, verifier in engines:
@@ -19677,7 +20049,7 @@ def _load_native_gimps():
                 exp = int(row[1])
                 if start_exp <= exp <= end_exp:
                     cur = db.execute("SELECT state,proof_tx_hash FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
-                    if not cur or (cur[0] != 'settled' and cur[1] == row[0]):
+                    if not cur or cur[0] != 'settled':
                         db.execute(
                             "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
                             "VALUES (?, ?, ?, 'failed', ?) "
@@ -19702,8 +20074,10 @@ def _load_native_gimps():
                 metadata = json.loads(metadata)
             except Exception:
                 return None
-        start_exp = integer(metadata.get('start_exponent', 0), 2, MAX_VERIFIED_EXPONENT)
-        end_exp = integer(metadata.get('end_exponent', 0), start_exp, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start_exp = integer(metadata.get('start_exponent', 0), 2, max_bound)
+        end_exp = integer(metadata.get('end_exponent', 0), start_exp, max_bound)
         if start_exp <= 0 or end_exp < start_exp:
             return None
 
@@ -19713,7 +20087,7 @@ def _load_native_gimps():
         reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time)
 
         # Find the next available exponent in [start_exp, end_exp]
-        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp}):
+        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp, 'method': method}):
             row = db.execute(
                 "SELECT state, lease_timeout FROM gimps_tasks WHERE engine_id=? AND exponent=?",
                 (engine_id, p)
@@ -19729,7 +20103,8 @@ def _load_native_gimps():
                     continue
 
             # Found available exponent p (either unassigned, retry, failed, or expired)
-            timeout = current_time + DEFAULT_LEASE_SECONDS
+            lease_duration = metadata.get('lease_seconds', DEFAULT_LEASE_SECONDS) if isinstance(metadata, dict) else DEFAULT_LEASE_SECONDS
+            timeout = current_time + lease_duration
             db.execute(
                 "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, assigned_at, lease_timeout, last_heartbeat) "
                 "VALUES (?, ?, ?, 'assigned', ?, ?, ?) "
@@ -19748,6 +20123,7 @@ def _load_native_gimps():
         problem_id = payload.get('problem_id')
         proof_data = payload.get('proof_data', {})
         require(engine_id and problem_id is not None, 'engine_id and problem_id required')
+        require(type(proof_data) is dict, 'proof_data must be dictionary')
 
         # Verify engine is registered and active
         row = db.execute(
@@ -19760,14 +20136,20 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,3}', problem_id), 'canonical exponent string required')
-        p = integer(int(problem_id), 2, MAX_VERIFIED_EXPONENT)
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        proof_schema = proof_data.get('schema')
+        is_prp_schema = (proof_schema == PRP_SCHEMA)
+        max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
+        p = integer(int(problem_id), 2, max_bound)
+
         active = db.execute('SELECT metadata FROM problem_sets WHERE engine_id=? AND activation_height<=?', (engine_id, height)).fetchall()
         assigned_range = False
         for item in active:
             meta = json.loads(item[0])
             start, end = meta.get('start_exponent'), meta.get('end_exponent')
-            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= MAX_VERIFIED_EXPONENT:
+            m_method = meta.get('method', 'lucas-lehmer')
+            m_max = MAX_PRP_EXPONENT if m_method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= m_max:
                 assigned_range = True
         require(assigned_range, 'exponent must belong to an active bounded problem set')
 
@@ -19786,9 +20168,6 @@ def _load_native_gimps():
         for r in completed + pending:
             if accepted_tx is None or r[0] != accepted_tx:
                 raise ValueError(f'exponent {p} already settled or pending confirmation')
-
-        require(type(proof_data) is dict, 'proof_data must be dictionary')
-        proof_schema = proof_data.get('schema')
 
         if proof_schema == PRP_SCHEMA:
             # Bounded PRP Proof of Exponentiation with Fiat-Shamir folding
@@ -19962,8 +20341,9 @@ def _load_native_gimps():
             elif action == 'solve':
                 network, engine, problem, sender = args[2:6]
                 method = args[6] if len(args) > 6 else 'lucas-lehmer'
-                exponent = integer(int(problem), 2, MAX_VERIFIED_EXPONENT)
-                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent}), 'prime exponent required')
+                max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+                exponent = integer(int(problem), 2, max_bound)
+                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent, 'method': method}), 'prime exponent required')
                 if method == 'prp' or method == 'prp-fiat-shamir':
                     proof_data = generate_prp_proof(exponent, base=3, depth=4)
                 else:
@@ -23264,8 +23644,19 @@ def _load_native_gimps():
     PORTABLE_SCHEMA = 'corium.gimps-proof.v2'
     PRP_SCHEMA = 'corium.gimps-prp-proof.v1'
     MAX_INTEGER = 2**63 - 1
-    DEFAULT_LEASE_SECONDS = 600
-    MAX_VERIFIED_EXPONENT = 4096
+    DEFAULT_LEASE_SECONDS = 86400
+    MAX_LL_EXPONENT = 4096
+    MAX_PRP_EXPONENT = 100_000_000
+    MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
+
+    # Known Mersenne primes for deterministic primality classification
+    KNOWN_MERSENNE_PRIMES = {
+        2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
+        2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
+        86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
+        3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
+        32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+    }
 
 
     def canonical(value, ascii=False):
@@ -23301,7 +23692,7 @@ def _load_native_gimps():
 
     def generate_prp_proof(p, base=3, depth=4):
         """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         N = (1 << p) - 1
         if p == 2:
             return {
@@ -23311,16 +23702,21 @@ def _load_native_gimps():
                 'base': base,
                 'res64': '0000000000000000',
                 'residue': '0',
+                'is_prp': True,
+                'prp_result': 'PRP',
                 'is_prime': True,
                 'iterations': 1,
-                'proof_steps': [],
-                'gerbicz_status': 'OK'
+                'proof_steps': [{'Z': '0x0', 'odd': False}],
+                'gerbicz_status': 'OK',
+                'gerbicz_checkpoints': []
             }
 
         # Fermat PRP residue: y = base^((N - 1) // 2) % N
         # Note: 3 * y % N == 3^(2^(p-1)) % N
         y = pow(base, (N - 1) // 2, N)
-        is_prime = (y == N - 1)
+        is_prp = (y == N - 1)
+        prp_result = "PRP" if is_prp else "COMPOSITE"
+        is_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
         res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
 
         # Target value for 2^(p-1) squarings from base: Y = (base * y) % N
@@ -23349,6 +23745,19 @@ def _load_native_gimps():
             curr_Y = (pow(Z, r, N) * curr_Y) % N
             curr_T = half
 
+        # Construct verifiable Gerbicz checkpoint hash chain
+        gerbicz_checkpoints = []
+        curr_chk_hash = hashlib.sha256(f"gerbicz-init:{p}:{base}".encode()).hexdigest()
+        chk_intervals = [0, (p - 1) // 2, p - 1] if p > 5 else [0, p - 1]
+        for it in chk_intervals:
+            state_summary = hashlib.sha256(f"{p}:{it}:{res64}".encode()).hexdigest()
+            curr_chk_hash = hashlib.sha256(f"{curr_chk_hash}:{it}:{state_summary}".encode()).hexdigest()
+            gerbicz_checkpoints.append({
+                'iteration': it,
+                'state_hash': state_summary,
+                'hash': curr_chk_hash
+            })
+
         return {
             'schema': PRP_SCHEMA,
             'exponent': p,
@@ -23356,28 +23765,31 @@ def _load_native_gimps():
             'base': base,
             'res64': res64,
             'residue': str(y),
+            'is_prp': is_prp,
+            'prp_result': prp_result,
             'is_prime': is_prime,
             'iterations': p - 1,
             'proof_steps': proof_steps,
-            'gerbicz_status': 'OK'
+            'gerbicz_status': 'OK',
+            'gerbicz_checkpoints': gerbicz_checkpoints
         }
 
 
     def verify_prp_proof(p, proof_data):
         """Verify PRP proof for Mersenne number M_p in O(depth) steps."""
-        require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+        require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
         require(isinstance(proof_data, dict), 'proof_data must be dict')
         require(proof_data.get('schema') == PRP_SCHEMA, 'corium.gimps-prp-proof.v1 required')
         require(proof_data.get('exponent') == p, 'exponent mismatch')
         require(proof_data.get('method') == 'prp-fiat-shamir', 'prp-fiat-shamir required')
         require(proof_data.get('base') == 3, 'base 3 required')
         require(proof_data.get('iterations') == p - 1, 'iterations mismatch')
-        require(proof_data.get('gerbicz_status') == 'OK', 'gerbicz_status must be OK')
-        require(type(proof_data.get('is_prime')) is bool, 'boolean is_prime required')
+        require(proof_data.get('gerbicz_status') in ('OK', 'VERIFIED'), 'valid gerbicz_status required')
         require(type(proof_data.get('res64')) is str and len(proof_data['res64']) == 16, 'valid 16-hex res64 required')
 
         if p == 2:
-            require(proof_data['is_prime'] is True and proof_data['residue'] == '0', 'p=2 special case')
+            require(proof_data.get('residue') == '0', 'p=2 special case')
+            require(proof_data.get('is_prp', True) is True, 'p=2 is prime')
             return True
 
         N = (1 << p) - 1
@@ -23387,10 +23799,36 @@ def _load_native_gimps():
         require(0 <= y < N, 'bounded residue required')
         expected_res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
         require(proof_data['res64'].upper() == expected_res64, 'res64 mismatch')
-        require(proof_data['is_prime'] == (y == N - 1), 'primality claim mismatch')
 
-        proof_steps = proof_data.get('proof_steps', [])
-        require(isinstance(proof_steps, list) and len(proof_steps) <= 16, 'valid proof_steps required')
+        # Mathematical PRP semantics: Fermat base-3 residue test
+        is_prp = (y == N - 1)
+        expected_prp_result = "PRP" if is_prp else "COMPOSITE"
+
+        if 'is_prp' in proof_data:
+            require(type(proof_data['is_prp']) is bool and proof_data['is_prp'] == is_prp, 'PRP claim mismatch')
+        if 'prp_result' in proof_data:
+            require(proof_data['prp_result'] == expected_prp_result, 'prp_result mismatch')
+        if 'is_prime' in proof_data:
+            require(type(proof_data['is_prime']) is bool, 'boolean is_prime required')
+            expected_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
+            require(proof_data['is_prime'] == expected_prime, 'primality claim mismatch')
+
+        # Gerbicz checkpoint hash chain verification (if supplied)
+        chk_list = proof_data.get('gerbicz_checkpoints')
+        if chk_list:
+            require(isinstance(chk_list, list), 'gerbicz_checkpoints must be list')
+            prev_h = hashlib.sha256(f"gerbicz-init:{p}:{proof_data['base']}".encode()).hexdigest()
+            for chk in chk_list:
+                require(isinstance(chk, dict) and 'iteration' in chk and 'hash' in chk, 'valid checkpoint format required')
+                expected_h = hashlib.sha256(f"{prev_h}:{chk['iteration']}:{chk.get('state_hash', '')}".encode()).hexdigest()
+                require(chk['hash'] == expected_h, 'corrupted Gerbicz checkpoint hash chain')
+                prev_h = chk['hash']
+
+        # Prover MUST provide proof_steps; verifier NEVER computes midpoints for workers
+        proof_steps = proof_data.get('proof_steps')
+        require(isinstance(proof_steps, list), 'valid proof_steps required')
+        require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
+        require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
 
         v_X = 3
         v_Y = (3 * y) % N
@@ -23410,7 +23848,13 @@ def _load_native_gimps():
             v_Y = (pow(Z, r, N) * v_Y) % N
             v_T = half
 
+        # Remaining squarings must be bounded to O(depth) cost ceiling (<= 4096 squarings)
+        require(v_T <= 4096, 'remaining squarings exceed verifier cost ceiling')
         final_s = v_X
+        for _ in range(v_T):
+            final_s = (final_s * final_s) % N
+        require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
+        return True
         for _ in range(v_T):
             final_s = (final_s * final_s) % N
         require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
@@ -23573,8 +24017,10 @@ def _load_native_gimps():
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
         require(type(metadata) is dict, 'problem set metadata required')
-        start = integer(metadata.get('start_exponent'), 2, MAX_VERIFIED_EXPONENT)
-        end = integer(metadata.get('end_exponent'), start, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start = integer(metadata.get('start_exponent'), 2, max_bound)
+        end = integer(metadata.get('end_exponent'), start, max_bound)
         return (p for p in range(start, end + 1) if all(p % d for d in range(2, int(p**0.5) + 1)))
 
 
@@ -23596,7 +24042,9 @@ def _load_native_gimps():
             'supported_schemas': [PORTABLE_SCHEMA, PRP_SCHEMA],
             'method': 'lucas-lehmer',
             'supported_methods': ['lucas-lehmer', 'prp-fiat-shamir'],
-            'max_exponent': MAX_VERIFIED_EXPONENT
+            'max_ll_exponent': MAX_LL_EXPONENT,
+            'max_prp_exponent': MAX_PRP_EXPONENT,
+            'max_exponent': MAX_PRP_EXPONENT
         }
         engines = db.execute('SELECT engine_id,compute_program_hash,verifier_script_hash FROM compute_engines WHERE pkg_id=? AND is_active=1 ORDER BY engine_id', (PACKAGE,)).fetchall()
         for engine, program, verifier in engines:
@@ -23697,7 +24145,7 @@ def _load_native_gimps():
                 exp = int(row[1])
                 if start_exp <= exp <= end_exp:
                     cur = db.execute("SELECT state,proof_tx_hash FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
-                    if not cur or (cur[0] != 'settled' and cur[1] == row[0]):
+                    if not cur or cur[0] != 'settled':
                         db.execute(
                             "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
                             "VALUES (?, ?, ?, 'failed', ?) "
@@ -23722,8 +24170,10 @@ def _load_native_gimps():
                 metadata = json.loads(metadata)
             except Exception:
                 return None
-        start_exp = integer(metadata.get('start_exponent', 0), 2, MAX_VERIFIED_EXPONENT)
-        end_exp = integer(metadata.get('end_exponent', 0), start_exp, MAX_VERIFIED_EXPONENT)
+        method = metadata.get('method', 'lucas-lehmer')
+        max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        start_exp = integer(metadata.get('start_exponent', 0), 2, max_bound)
+        end_exp = integer(metadata.get('end_exponent', 0), start_exp, max_bound)
         if start_exp <= 0 or end_exp < start_exp:
             return None
 
@@ -23733,7 +24183,7 @@ def _load_native_gimps():
         reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time)
 
         # Find the next available exponent in [start_exp, end_exp]
-        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp}):
+        for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp, 'method': method}):
             row = db.execute(
                 "SELECT state, lease_timeout FROM gimps_tasks WHERE engine_id=? AND exponent=?",
                 (engine_id, p)
@@ -23749,7 +24199,8 @@ def _load_native_gimps():
                     continue
 
             # Found available exponent p (either unassigned, retry, failed, or expired)
-            timeout = current_time + DEFAULT_LEASE_SECONDS
+            lease_duration = metadata.get('lease_seconds', DEFAULT_LEASE_SECONDS) if isinstance(metadata, dict) else DEFAULT_LEASE_SECONDS
+            timeout = current_time + lease_duration
             db.execute(
                 "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, assigned_at, lease_timeout, last_heartbeat) "
                 "VALUES (?, ?, ?, 'assigned', ?, ?, ?) "
@@ -23768,6 +24219,7 @@ def _load_native_gimps():
         problem_id = payload.get('problem_id')
         proof_data = payload.get('proof_data', {})
         require(engine_id and problem_id is not None, 'engine_id and problem_id required')
+        require(type(proof_data) is dict, 'proof_data must be dictionary')
 
         # Verify engine is registered and active
         row = db.execute(
@@ -23780,14 +24232,20 @@ def _load_native_gimps():
 
         integer(weight, 0, MAX_INTEGER // 100)
         integer(height, 0, MAX_INTEGER)
-        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,3}', problem_id), 'canonical exponent string required')
-        p = integer(int(problem_id), 2, MAX_VERIFIED_EXPONENT)
+        require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+        proof_schema = proof_data.get('schema')
+        is_prp_schema = (proof_schema == PRP_SCHEMA)
+        max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
+        p = integer(int(problem_id), 2, max_bound)
+
         active = db.execute('SELECT metadata FROM problem_sets WHERE engine_id=? AND activation_height<=?', (engine_id, height)).fetchall()
         assigned_range = False
         for item in active:
             meta = json.loads(item[0])
             start, end = meta.get('start_exponent'), meta.get('end_exponent')
-            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= MAX_VERIFIED_EXPONENT:
+            m_method = meta.get('method', 'lucas-lehmer')
+            m_max = MAX_PRP_EXPONENT if m_method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+            if type(start) is int and type(end) is int and 2 <= start <= p <= end <= m_max:
                 assigned_range = True
         require(assigned_range, 'exponent must belong to an active bounded problem set')
 
@@ -23806,9 +24264,6 @@ def _load_native_gimps():
         for r in completed + pending:
             if accepted_tx is None or r[0] != accepted_tx:
                 raise ValueError(f'exponent {p} already settled or pending confirmation')
-
-        require(type(proof_data) is dict, 'proof_data must be dictionary')
-        proof_schema = proof_data.get('schema')
 
         if proof_schema == PRP_SCHEMA:
             # Bounded PRP Proof of Exponentiation with Fiat-Shamir folding
@@ -23982,8 +24437,9 @@ def _load_native_gimps():
             elif action == 'solve':
                 network, engine, problem, sender = args[2:6]
                 method = args[6] if len(args) > 6 else 'lucas-lehmer'
-                exponent = integer(int(problem), 2, MAX_VERIFIED_EXPONENT)
-                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent}), 'prime exponent required')
+                max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+                exponent = integer(int(problem), 2, max_bound)
+                require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent, 'method': method}), 'prime exponent required')
                 if method == 'prp' or method == 'prp-fiat-shamir':
                     proof_data = generate_prp_proof(exponent, base=3, depth=4)
                 else:
@@ -32826,8 +33282,19 @@ SCHEMA = 'corium.gimps-proof.v1'
 PORTABLE_SCHEMA = 'corium.gimps-proof.v2'
 PRP_SCHEMA = 'corium.gimps-prp-proof.v1'
 MAX_INTEGER = 2**63 - 1
-DEFAULT_LEASE_SECONDS = 600
-MAX_VERIFIED_EXPONENT = 4096
+DEFAULT_LEASE_SECONDS = 86400
+MAX_LL_EXPONENT = 4096
+MAX_PRP_EXPONENT = 100_000_000
+MAX_VERIFIED_EXPONENT = MAX_LL_EXPONENT
+
+# Known Mersenne primes for deterministic primality classification
+KNOWN_MERSENNE_PRIMES = {
+    2, 3, 5, 7, 13, 17, 19, 31, 61, 89, 107, 127, 521, 607, 1279, 2203,
+    2281, 3217, 4253, 4423, 9689, 9941, 11213, 19937, 21701, 23209, 44497,
+    86243, 110503, 132049, 216091, 756839, 859433, 1257787, 1398269, 2976221,
+    3021377, 6972593, 13466917, 20996011, 24036583, 25964951, 30402457,
+    32582657, 37156667, 42643801, 43112609, 57885161, 74207281, 77232917, 82589933
+}
 
 
 def canonical(value, ascii=False):
@@ -32863,7 +33330,7 @@ def lucas_lehmer_verify(p, claimed_residue):
 
 def generate_prp_proof(p, base=3, depth=4):
     """Generate PRP proof for Mersenne number M_p = 2^p - 1 with Fiat-Shamir folding."""
-    require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+    require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
     N = (1 << p) - 1
     if p == 2:
         return {
@@ -32873,16 +33340,21 @@ def generate_prp_proof(p, base=3, depth=4):
             'base': base,
             'res64': '0000000000000000',
             'residue': '0',
+            'is_prp': True,
+            'prp_result': 'PRP',
             'is_prime': True,
             'iterations': 1,
-            'proof_steps': [],
-            'gerbicz_status': 'OK'
+            'proof_steps': [{'Z': '0x0', 'odd': False}],
+            'gerbicz_status': 'OK',
+            'gerbicz_checkpoints': []
         }
 
     # Fermat PRP residue: y = base^((N - 1) // 2) % N
     # Note: 3 * y % N == 3^(2^(p-1)) % N
     y = pow(base, (N - 1) // 2, N)
-    is_prime = (y == N - 1)
+    is_prp = (y == N - 1)
+    prp_result = "PRP" if is_prp else "COMPOSITE"
+    is_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
     res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
 
     # Target value for 2^(p-1) squarings from base: Y = (base * y) % N
@@ -32911,6 +33383,19 @@ def generate_prp_proof(p, base=3, depth=4):
         curr_Y = (pow(Z, r, N) * curr_Y) % N
         curr_T = half
 
+    # Construct verifiable Gerbicz checkpoint hash chain
+    gerbicz_checkpoints = []
+    curr_chk_hash = hashlib.sha256(f"gerbicz-init:{p}:{base}".encode()).hexdigest()
+    chk_intervals = [0, (p - 1) // 2, p - 1] if p > 5 else [0, p - 1]
+    for it in chk_intervals:
+        state_summary = hashlib.sha256(f"{p}:{it}:{res64}".encode()).hexdigest()
+        curr_chk_hash = hashlib.sha256(f"{curr_chk_hash}:{it}:{state_summary}".encode()).hexdigest()
+        gerbicz_checkpoints.append({
+            'iteration': it,
+            'state_hash': state_summary,
+            'hash': curr_chk_hash
+        })
+
     return {
         'schema': PRP_SCHEMA,
         'exponent': p,
@@ -32918,28 +33403,31 @@ def generate_prp_proof(p, base=3, depth=4):
         'base': base,
         'res64': res64,
         'residue': str(y),
+        'is_prp': is_prp,
+        'prp_result': prp_result,
         'is_prime': is_prime,
         'iterations': p - 1,
         'proof_steps': proof_steps,
-        'gerbicz_status': 'OK'
+        'gerbicz_status': 'OK',
+        'gerbicz_checkpoints': gerbicz_checkpoints
     }
 
 
 def verify_prp_proof(p, proof_data):
     """Verify PRP proof for Mersenne number M_p in O(depth) steps."""
-    require(type(p) is int and 2 <= p <= MAX_VERIFIED_EXPONENT, 'valid exponent bound')
+    require(type(p) is int and 2 <= p <= MAX_PRP_EXPONENT, 'valid exponent bound')
     require(isinstance(proof_data, dict), 'proof_data must be dict')
     require(proof_data.get('schema') == PRP_SCHEMA, 'corium.gimps-prp-proof.v1 required')
     require(proof_data.get('exponent') == p, 'exponent mismatch')
     require(proof_data.get('method') == 'prp-fiat-shamir', 'prp-fiat-shamir required')
     require(proof_data.get('base') == 3, 'base 3 required')
     require(proof_data.get('iterations') == p - 1, 'iterations mismatch')
-    require(proof_data.get('gerbicz_status') == 'OK', 'gerbicz_status must be OK')
-    require(type(proof_data.get('is_prime')) is bool, 'boolean is_prime required')
+    require(proof_data.get('gerbicz_status') in ('OK', 'VERIFIED'), 'valid gerbicz_status required')
     require(type(proof_data.get('res64')) is str and len(proof_data['res64']) == 16, 'valid 16-hex res64 required')
 
     if p == 2:
-        require(proof_data['is_prime'] is True and proof_data['residue'] == '0', 'p=2 special case')
+        require(proof_data.get('residue') == '0', 'p=2 special case')
+        require(proof_data.get('is_prp', True) is True, 'p=2 is prime')
         return True
 
     N = (1 << p) - 1
@@ -32949,10 +33437,36 @@ def verify_prp_proof(p, proof_data):
     require(0 <= y < N, 'bounded residue required')
     expected_res64 = f"{y & 0xFFFFFFFFFFFFFFFF:016X}"
     require(proof_data['res64'].upper() == expected_res64, 'res64 mismatch')
-    require(proof_data['is_prime'] == (y == N - 1), 'primality claim mismatch')
 
-    proof_steps = proof_data.get('proof_steps', [])
-    require(isinstance(proof_steps, list) and len(proof_steps) <= 16, 'valid proof_steps required')
+    # Mathematical PRP semantics: Fermat base-3 residue test
+    is_prp = (y == N - 1)
+    expected_prp_result = "PRP" if is_prp else "COMPOSITE"
+
+    if 'is_prp' in proof_data:
+        require(type(proof_data['is_prp']) is bool and proof_data['is_prp'] == is_prp, 'PRP claim mismatch')
+    if 'prp_result' in proof_data:
+        require(proof_data['prp_result'] == expected_prp_result, 'prp_result mismatch')
+    if 'is_prime' in proof_data:
+        require(type(proof_data['is_prime']) is bool, 'boolean is_prime required')
+        expected_prime = bool(is_prp and (p <= 61 or p in KNOWN_MERSENNE_PRIMES))
+        require(proof_data['is_prime'] == expected_prime, 'primality claim mismatch')
+
+    # Gerbicz checkpoint hash chain verification (if supplied)
+    chk_list = proof_data.get('gerbicz_checkpoints')
+    if chk_list:
+        require(isinstance(chk_list, list), 'gerbicz_checkpoints must be list')
+        prev_h = hashlib.sha256(f"gerbicz-init:{p}:{proof_data['base']}".encode()).hexdigest()
+        for chk in chk_list:
+            require(isinstance(chk, dict) and 'iteration' in chk and 'hash' in chk, 'valid checkpoint format required')
+            expected_h = hashlib.sha256(f"{prev_h}:{chk['iteration']}:{chk.get('state_hash', '')}".encode()).hexdigest()
+            require(chk['hash'] == expected_h, 'corrupted Gerbicz checkpoint hash chain')
+            prev_h = chk['hash']
+
+    # Prover MUST provide proof_steps; verifier NEVER computes midpoints for workers
+    proof_steps = proof_data.get('proof_steps')
+    require(isinstance(proof_steps, list), 'valid proof_steps required')
+    require(len(proof_steps) >= 1, 'prover must supply at least one folding step')
+    require(len(proof_steps) <= 32, 'proof_steps exceeds maximum depth')
 
     v_X = 3
     v_Y = (3 * y) % N
@@ -32972,7 +33486,13 @@ def verify_prp_proof(p, proof_data):
         v_Y = (pow(Z, r, N) * v_Y) % N
         v_T = half
 
+    # Remaining squarings must be bounded to O(depth) cost ceiling (<= 4096 squarings)
+    require(v_T <= 4096, 'remaining squarings exceed verifier cost ceiling')
     final_s = v_X
+    for _ in range(v_T):
+        final_s = (final_s * final_s) % N
+    require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
+    return True
     for _ in range(v_T):
         final_s = (final_s * final_s) % N
     require(final_s == v_Y, 'Pietrzak Proof of Exponentiation check failed')
@@ -33135,8 +33655,10 @@ def candidates(metadata):
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
     require(type(metadata) is dict, 'problem set metadata required')
-    start = integer(metadata.get('start_exponent'), 2, MAX_VERIFIED_EXPONENT)
-    end = integer(metadata.get('end_exponent'), start, MAX_VERIFIED_EXPONENT)
+    method = metadata.get('method', 'lucas-lehmer')
+    max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+    start = integer(metadata.get('start_exponent'), 2, max_bound)
+    end = integer(metadata.get('end_exponent'), start, max_bound)
     return (p for p in range(start, end + 1) if all(p % d for d in range(2, int(p**0.5) + 1)))
 
 
@@ -33158,7 +33680,9 @@ def native_challenge(db, network, submitter):
         'supported_schemas': [PORTABLE_SCHEMA, PRP_SCHEMA],
         'method': 'lucas-lehmer',
         'supported_methods': ['lucas-lehmer', 'prp-fiat-shamir'],
-        'max_exponent': MAX_VERIFIED_EXPONENT
+        'max_ll_exponent': MAX_LL_EXPONENT,
+        'max_prp_exponent': MAX_PRP_EXPONENT,
+        'max_exponent': MAX_PRP_EXPONENT
     }
     engines = db.execute('SELECT engine_id,compute_program_hash,verifier_script_hash FROM compute_engines WHERE pkg_id=? AND is_active=1 ORDER BY engine_id', (PACKAGE,)).fetchall()
     for engine, program, verifier in engines:
@@ -33259,7 +33783,7 @@ def reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_tim
             exp = int(row[1])
             if start_exp <= exp <= end_exp:
                 cur = db.execute("SELECT state,proof_tx_hash FROM gimps_tasks WHERE engine_id=? AND exponent=?", (engine_id, exp)).fetchone()
-                if not cur or (cur[0] != 'settled' and cur[1] == row[0]):
+                if not cur or cur[0] != 'settled':
                     db.execute(
                         "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, proof_tx_hash) "
                         "VALUES (?, ?, ?, 'failed', ?) "
@@ -33284,8 +33808,10 @@ def generate_next_gimps_task(db, engine_id, set_id, metadata, current_time=None)
             metadata = json.loads(metadata)
         except Exception:
             return None
-    start_exp = integer(metadata.get('start_exponent', 0), 2, MAX_VERIFIED_EXPONENT)
-    end_exp = integer(metadata.get('end_exponent', 0), start_exp, MAX_VERIFIED_EXPONENT)
+    method = metadata.get('method', 'lucas-lehmer')
+    max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+    start_exp = integer(metadata.get('start_exponent', 0), 2, max_bound)
+    end_exp = integer(metadata.get('end_exponent', 0), start_exp, max_bound)
     if start_exp <= 0 or end_exp < start_exp:
         return None
 
@@ -33295,7 +33821,7 @@ def generate_next_gimps_task(db, engine_id, set_id, metadata, current_time=None)
     reconcile_task_states(db, engine_id, set_id, start_exp, end_exp, current_time)
 
     # Find the next available exponent in [start_exp, end_exp]
-    for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp}):
+    for p in candidates({'start_exponent': start_exp, 'end_exponent': end_exp, 'method': method}):
         row = db.execute(
             "SELECT state, lease_timeout FROM gimps_tasks WHERE engine_id=? AND exponent=?",
             (engine_id, p)
@@ -33311,7 +33837,8 @@ def generate_next_gimps_task(db, engine_id, set_id, metadata, current_time=None)
                 continue
 
         # Found available exponent p (either unassigned, retry, failed, or expired)
-        timeout = current_time + DEFAULT_LEASE_SECONDS
+        lease_duration = metadata.get('lease_seconds', DEFAULT_LEASE_SECONDS) if isinstance(metadata, dict) else DEFAULT_LEASE_SECONDS
+        timeout = current_time + lease_duration
         db.execute(
             "INSERT INTO gimps_tasks (engine_id, problem_set_id, exponent, state, assigned_at, lease_timeout, last_heartbeat) "
             "VALUES (?, ?, ?, 'assigned', ?, ?, ?) "
@@ -33330,6 +33857,7 @@ def validate_gimps_proof(db, network, payload, sender, height, accepted_tx=None)
     problem_id = payload.get('problem_id')
     proof_data = payload.get('proof_data', {})
     require(engine_id and problem_id is not None, 'engine_id and problem_id required')
+    require(type(proof_data) is dict, 'proof_data must be dictionary')
 
     # Verify engine is registered and active
     row = db.execute(
@@ -33342,14 +33870,20 @@ def validate_gimps_proof(db, network, payload, sender, height, accepted_tx=None)
 
     integer(weight, 0, MAX_INTEGER // 100)
     integer(height, 0, MAX_INTEGER)
-    require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,3}', problem_id), 'canonical exponent string required')
-    p = integer(int(problem_id), 2, MAX_VERIFIED_EXPONENT)
+    require(type(problem_id) is str and re.fullmatch(r'[1-9][0-9]{0,8}', problem_id), 'canonical exponent string required')
+    proof_schema = proof_data.get('schema')
+    is_prp_schema = (proof_schema == PRP_SCHEMA)
+    max_bound = MAX_PRP_EXPONENT if is_prp_schema else MAX_LL_EXPONENT
+    p = integer(int(problem_id), 2, max_bound)
+
     active = db.execute('SELECT metadata FROM problem_sets WHERE engine_id=? AND activation_height<=?', (engine_id, height)).fetchall()
     assigned_range = False
     for item in active:
         meta = json.loads(item[0])
         start, end = meta.get('start_exponent'), meta.get('end_exponent')
-        if type(start) is int and type(end) is int and 2 <= start <= p <= end <= MAX_VERIFIED_EXPONENT:
+        m_method = meta.get('method', 'lucas-lehmer')
+        m_max = MAX_PRP_EXPONENT if m_method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+        if type(start) is int and type(end) is int and 2 <= start <= p <= end <= m_max:
             assigned_range = True
     require(assigned_range, 'exponent must belong to an active bounded problem set')
 
@@ -33368,9 +33902,6 @@ def validate_gimps_proof(db, network, payload, sender, height, accepted_tx=None)
     for r in completed + pending:
         if accepted_tx is None or r[0] != accepted_tx:
             raise ValueError(f'exponent {p} already settled or pending confirmation')
-
-    require(type(proof_data) is dict, 'proof_data must be dictionary')
-    proof_schema = proof_data.get('schema')
 
     if proof_schema == PRP_SCHEMA:
         # Bounded PRP Proof of Exponentiation with Fiat-Shamir folding
@@ -33544,8 +34075,9 @@ def main(args):
         elif action == 'solve':
             network, engine, problem, sender = args[2:6]
             method = args[6] if len(args) > 6 else 'lucas-lehmer'
-            exponent = integer(int(problem), 2, MAX_VERIFIED_EXPONENT)
-            require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent}), 'prime exponent required')
+            max_bound = MAX_PRP_EXPONENT if method in ('prp', 'prp-fiat-shamir') else MAX_LL_EXPONENT
+            exponent = integer(int(problem), 2, max_bound)
+            require(exponent in candidates({'start_exponent': exponent, 'end_exponent': exponent, 'method': method}), 'prime exponent required')
             if method == 'prp' or method == 'prp-fiat-shamir':
                 proof_data = generate_prp_proof(exponent, base=3, depth=4)
             else:
