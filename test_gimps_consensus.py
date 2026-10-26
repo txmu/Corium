@@ -97,6 +97,26 @@ class GimpsConsensusTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_portable_large_residue_and_native_independent_challenge(self):
+        with sqlite3.connect(self.db_path) as db:
+            db.execute('CREATE TABLE chain_state (key TEXT PRIMARY KEY,value TEXT)')
+            db.execute('INSERT INTO blocks VALUES (1,?,?)',('a'*64,'[]'))
+            db.execute('INSERT INTO chain_state VALUES (?,?)',('chain_info','a'*64+'|1'))
+            before=db.total_changes
+            job=GIMPS.native_challenge(db,'test-net','user-a')
+            self.assertEqual(job['engine_id'],'gimps-ci');self.assertEqual(job['exponent'],5)
+            self.assertEqual(db.total_changes,before,'challenge must remain read-only')
+            db.execute("UPDATE problem_sets SET metadata=?",(json.dumps({'start_exponent':2,'end_exponent':127}),))
+            _,residue=GIMPS.lucas_lehmer_verify(67,0)
+            self.assertGreater(residue,2**53)
+            proof={'schema':GIMPS.PORTABLE_SCHEMA,'exponent':67,'method':'lucas-lehmer','residue':str(residue),'is_prime':False,'iterations':65}
+            payload={'engine_id':'gimps-ci','problem_id':'67','proof_data':proof}
+            self.assertEqual(GIMPS.validate_gimps_proof(db,'test-net',payload,'user-a',1)['status'],'valid')
+            proof['residue']='0'+proof['residue']
+            with self.assertRaises(ValueError):GIMPS.validate_gimps_proof(db,'test-net',payload,'user-a',1)
+            db.execute('UPDATE compute_engines SET is_active=0')
+            self.assertFalse(GIMPS.native_challenge(db,'test-net','user-a')['available'])
+
     def test_lucas_lehmer_verify(self):
         # M_3 = 2^3 - 1 = 7 (prime, s=0)
         valid, s = GIMPS.lucas_lehmer_verify(3, 0)
@@ -125,13 +145,13 @@ class GimpsConsensusTests(unittest.TestCase):
             task1 = GIMPS.generate_next_gimps_task(db, 'gimps-ci', 'ps-1', meta, current_time=1000)
             self.assertEqual(task1, '5|5')
 
-            # While 5 is assigned, next task is 6
+            # Only prime exponents are useful LL tasks; composite 6 is skipped
             task2 = GIMPS.generate_next_gimps_task(db, 'gimps-ci', 'ps-1', meta, current_time=1001)
-            self.assertEqual(task2, '6|6')
+            self.assertEqual(task2, '7|7')
 
             # Next task is 7
             task3 = GIMPS.generate_next_gimps_task(db, 'gimps-ci', 'ps-1', meta, current_time=1002)
-            self.assertEqual(task3, '7|7')
+            self.assertIsNone(task3)
 
             # Now all 5, 6, 7 are assigned (in-flight) -> none available
             task4 = GIMPS.generate_next_gimps_task(db, 'gimps-ci', 'ps-1', meta, current_time=1003)
