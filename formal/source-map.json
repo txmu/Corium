@@ -61,7 +61,7 @@
     "_internal_consensus_safety_check": "6336d5f7a0ad9db641ada541d316c972c4a917e1547a8180065b0db636f964f9",
     "dht_bootstrap": "0fec92c6f18f2e42093aa6fc27012b4e897720724202de57f8d7414c320af794",
     "blockchain_create_genesis_block": "fc3013d65744bc693896667d1620d6f260e349d56dfb14c53e6359bfc8d3363a",
-    "file:consensus_hold.py": "e170d761c1460e2d4632d7bcf65ce6d30f50ea6b54d75b7a3df69cb446cdff35",
+    "file:consensus_hold.py": "fa26a75beb28471c9c40c296c039d6eb5835515cea0c97208c6f7229cd66b0bf",
     "file:formal/contracts.json": "e6f114a15ac8738b4eef1c5b2bed290c1b1efcf2f8529659316d9cab006eea11",
     "file:formal/generate_guards.py": "da17dd6bbda8cf4c00e01e7e8ca4e91e0c8e8ba16b1634b1932ebbd954f7747b",
     "file:cooperative_protocol.py": "2002aa7e9e963ab7b550bf58bc099ca622100888e5ca7863b2449f665729c3c6",

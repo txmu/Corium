@@ -150,10 +150,9 @@ def _verify_recovery_auth(auth, path_context=None):
 
 def start_permitted(path):
     p = Path(path)
-    is_mainnet = (
-        os.environ.get('CORIUM_NETWORK_ID_OVERRIDE') == 'ziokt-main' or
-        'ziokt-production' in str(p) or
-        p.name == 'consensus-safety-hold.json'
+    network = os.environ.get('CORIUM_NETWORK_ID_OVERRIDE')
+    is_mainnet = network == 'ziokt-main' if network is not None else (
+        'ziokt-production' in str(p) or p.name == 'consensus-safety-hold.json'
     )
 
     try:
