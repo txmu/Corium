@@ -6,6 +6,7 @@ from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from test_core import Fixture
+from unittest.mock import patch
 from test_gateway import SOURCE,DAEMON
 
 class ReorgTests(Fixture):

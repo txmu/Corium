@@ -152,7 +152,7 @@ class NativeOpenCIAdmission(Fixture):
         tx=self.run_core('blockchain_create_transaction propose_new_compute_engine '+shlex.quote(json.dumps(proposal))).stdout.strip().splitlines()[-1]
         rejected=self.run_core('declare -A tracker=() cache=(); _validate_single_transaction '+tx+' \"\" \"\" 1 tracker cache',ok=False)
         self.assertIn('OPENCI_CONSENSUS_REJECTED',rejected.stderr+rejected.stdout)
-        mined=self.run_core('blockchain_mine_block')
+        mined=self.run_core('blockchain_mine_block',ok=False)
         self.assertIn('Skipping a pending transaction',mined.stderr+mined.stdout)
         with sqlite3.connect(self.chain) as db:
             self.assertEqual(db.execute('SELECT max(height) FROM blocks').fetchone()[0],0)

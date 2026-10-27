@@ -39954,7 +39954,10 @@ blockchain_mine_block() (
         tx_json+="\"$hash\""
     done <<< "$pending_txs"
     tx_json+="]"
-    if [ "${#tx_hashes_in_block[@]}" -eq 0 ] && [ "$allow_empty" != true ]; then return 0; fi
+    if [ "${#tx_hashes_in_block[@]}" -eq 0 ] && [ "$allow_empty" != true ]; then
+        warn "No valid pending transaction remains for this candidate block."
+        return 1
+    fi
     
     # 6. 创建并签名新区块 (本地操作) (Create and sign a new block (local operation))
     local validator_id=$(_internal_hash_text "$our_pubkey")

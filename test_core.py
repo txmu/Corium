@@ -248,6 +248,12 @@ class CoreTests(Fixture):
         expected=self.semantic();self.run_core('blockchain_mine_block',False);self.assertEqual(self.semantic(),expected)
         self.run_core('db_begin_transaction "$BLOCKCHAIN_DB"; db_execute_safe "$BLOCKCHAIN_DB" "DELETE FROM validators;"; ignored=$(db_commit_transaction "$BLOCKCHAIN_DB"); db_rollback_transaction "$BLOCKCHAIN_DB"')
         self.assertEqual(self.semantic(),expected)
+        # An invalid entry cannot poison a later valid candidate or be included.
+        self.run_core('blockchain_create_transaction set_nickname \'{"nickname":"survivor"}\' >/dev/null; blockchain_mine_block')
+        with sqlite3.connect(self.chain) as db:
+            self.assertEqual(db.execute('SELECT max(height) FROM blocks').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT count(*) FROM transactions WHERE block_height=1').fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT count(*) FROM transactions WHERE signature='00' AND block_height IS NULL").fetchone()[0],1)
     def test_exodus_real_proposal_notarization_quorum_and_forged_record(self):
         result=self.run_core('corix_exodus propose-snapshot 0')
         with sqlite3.connect(self.forum) as db:proposal=db.execute('SELECT proposal_hash FROM exodus_proposals').fetchone()[0]
