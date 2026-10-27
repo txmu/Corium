@@ -11,6 +11,8 @@ from test_gateway import SOURCE,DAEMON
 class ReorgTests(Fixture):
     def setUp(self):
         super().setUp()
+        environment=patch.dict(os.environ)
+        environment.start();self.addCleanup(environment.stop)
         self.remote=self.root/'peer/chain.db';self.remote.parent.mkdir()
         with sqlite3.connect(self.chain) as src,sqlite3.connect(self.remote) as dst:src.backup(dst)
         # The peer transport identity must differ from the local node identity;

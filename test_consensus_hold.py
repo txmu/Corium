@@ -3,11 +3,22 @@ from pathlib import Path
 import tempfile
 import unittest
 import hashlib
+import os
+from unittest.mock import patch
 from consensus_hold import start_permitted
 from test_core import Fixture
 
 
 class ConsensusHoldTests(unittest.TestCase):
+    def test_sidechain_hold_in_production_is_network_scoped(self):
+        with tempfile.TemporaryDirectory(prefix='ziokt-production-') as directory:
+            path=Path(directory)/'consensus-safety-hold.json'
+            path.write_text(json.dumps({'schema':'ziokt.consensus-safety-hold.v1','active':False}));path.chmod(0o600)
+            with patch.dict(os.environ,{'CORIUM_NETWORK_ID_OVERRIDE':'ziokt-dna-side-20261024'}):
+                self.assertTrue(start_permitted(path))
+            with patch.dict(os.environ,{'CORIUM_NETWORK_ID_OVERRIDE':'ziokt-main'}):
+                self.assertFalse(start_permitted(path))
+
     def test_boot_guard_requires_absent_or_explicitly_cleared_private_hold(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'hold.json'
@@ -41,6 +52,9 @@ class NativeMutationHoldTests(Fixture):
 
 class MainnetRecoveryHoldTests(unittest.TestCase):
     def setUp(self):
+        environment=patch.dict(os.environ,{'CORIUM_NETWORK_ID_OVERRIDE':'ziokt-main'})
+        environment.start();self.addCleanup(environment.stop)
+        os.environ.pop('CORIUM_ROOT',None)
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import ec
         self.priv = ec.generate_private_key(ec.SECP256K1())
