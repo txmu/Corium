@@ -53,7 +53,7 @@ class Compute(Fixture):
         result=self.run_core('_execute_mod_in_sandbox corium/built-in-gimps contribution_compute /usr/bin/python3 -c '+shlex.quote(program))
         self.assertEqual(json.loads(result.stdout.splitlines()[-1]),{'exponent':5,'residue':0,'is_prime':True})
         self.put_transaction('submit_math_proof',{'engine_id':'gimps-ci','problem_id':'5','proof_data':{'residue':0}},1)
-        self.assertEqual(self.run_core("_internal_generate_gimps_task gimps-ci set-ci '{\"start_exponent\":5,\"end_exponent\":7}'").stdout.strip(),'6|6')
+        self.assertEqual(self.run_core("_internal_generate_gimps_task gimps-ci set-ci '{\"start_exponent\":5,\"end_exponent\":7}'").stdout.strip(),'7|7')
         self.put_transaction('submit_math_proof',{'engine_id':'gimps-ci','problem_id':'7','proof_data':{}},2)
         self.run_core("_internal_generate_gimps_task gimps-ci set-ci '{\"start_exponent\":5,\"end_exponent\":7}'",ok=False)
 
