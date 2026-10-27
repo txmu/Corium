@@ -29,6 +29,11 @@
       "_internal_replay_chain_state",
       "_blockchain_reorganize_to"
     ],
+    "Cooperative admission and canonical application": [
+      "_validate_single_transaction",
+      "blockchain_create_transaction",
+      "blockchain_mine_block"
+    ],
     "Bootstrap history safety and explicit discovery": [
       "_internal_consensus_safety_check",
       "dht_bootstrap",
@@ -50,11 +55,17 @@
     "_internal_db_restore_snapshot": "c6507c6d1c8742375feb4861154e0dd0724d9828f05e0f2ac5307883cd4ec539",
     "_internal_replay_chain_state": "b6ab11cdd128888bdc663f469b7b3dd3253331f7f49816db821e41f796022b09",
     "_blockchain_reorganize_to": "33ad30e1d7afc9e1697667402cdb6d0da9f56451bebed44524b02db613b18db5",
+    "_validate_single_transaction": "aea2d1f980ed5033ecb0ba9a4f6f963a42b0663014af832ad1aa507f8c265b13",
+    "blockchain_create_transaction": "b689521b22be89d511d7b5f1911784c75d3e11c375e8c17b8f70b40a329a6135",
+    "blockchain_mine_block": "a745cc8f7d15a129e648af86968eac4a0eb6979969ce4e531a21f0204d6c03a3",
     "_internal_consensus_safety_check": "6336d5f7a0ad9db641ada541d316c972c4a917e1547a8180065b0db636f964f9",
     "dht_bootstrap": "0fec92c6f18f2e42093aa6fc27012b4e897720724202de57f8d7414c320af794",
     "blockchain_create_genesis_block": "fc3013d65744bc693896667d1620d6f260e349d56dfb14c53e6359bfc8d3363a",
     "file:consensus_hold.py": "e170d761c1460e2d4632d7bcf65ce6d30f50ea6b54d75b7a3df69cb446cdff35",
     "file:formal/contracts.json": "e6f114a15ac8738b4eef1c5b2bed290c1b1efcf2f8529659316d9cab006eea11",
-    "file:formal/generate_guards.py": "da17dd6bbda8cf4c00e01e7e8ca4e91e0c8e8ba16b1634b1932ebbd954f7747b"
+    "file:formal/generate_guards.py": "da17dd6bbda8cf4c00e01e7e8ca4e91e0c8e8ba16b1634b1932ebbd954f7747b",
+    "file:cooperative_protocol.py": "2002aa7e9e963ab7b550bf58bc099ca622100888e5ca7863b2449f665729c3c6",
+    "file:cooperative_consensus.py": "608708ca34428625ad24716f509dc09bede67943a4bc34e67cd57e8af911fcec",
+    "file:work_consensus.py": "d02d97e8d5654a095b4a0d2efd870a2cc3db64ddd5c4fb483ca5c192915b58af"
   }
 }

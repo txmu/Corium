@@ -63,4 +63,28 @@ theorem exited_member_removed (c : Cooperative) (member : Nat) :
     member ∉ (memberExit c member).members := by
   simp [memberExit]
 
+def assetAuthorized (voters members previous incoming chain expected : Nat)
+    (ownershipProof : Bool) : Prop :=
+  quorum voters members ∧ incoming = previous + 1 ∧ chain = expected ∧ ownershipProof = true
+
+theorem asset_minority_rejected (v m old next chain expected : Nat) (proof : Bool)
+    (h : ¬ quorum v m) : ¬ assetAuthorized v m old next chain expected proof := by
+  intro accepted
+  exact h accepted.1
+
+theorem asset_nonce_replay_rejected (v m old chain expected : Nat) (proof : Bool) :
+    ¬ assetAuthorized v m old old chain expected proof := by
+  intro accepted
+  have fresh := accepted.2.1
+  omega
+
+theorem asset_cross_chain_rejected (v m old next chain expected : Nat) (proof : Bool)
+    (h : chain ≠ expected) : ¬ assetAuthorized v m old next chain expected proof := by
+  intro accepted
+  exact h accepted.2.2.1
+
+theorem asset_quorum_cannot_replace_ownership_proof (v m old next chain expected : Nat) :
+    ¬ assetAuthorized v m old next chain expected false := by
+  simp [assetAuthorized]
+
 end Corium.Cooperatives

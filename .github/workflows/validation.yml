@@ -49,7 +49,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
-          python -m unittest -v test_consensus_core test_multinode_sovereign test_consensus_process_survival test_consensus_hold test_history_verifier test_native_history_replay test_history_provenance test_native_p2p_local test_dna_protocol test_cooperative_protocol 2>&1 | tee ci-logs/consensus-integrity.log
+          python -m unittest -v test_consensus_core test_multinode_sovereign test_consensus_process_survival test_consensus_hold test_history_verifier test_native_history_replay test_history_provenance test_native_p2p_local test_dna_protocol test_cooperative_protocol test_cooperative_consensus_replay test_cooperative_native 2>&1 | tee ci-logs/consensus-integrity.log
       - name: Native Ziokt opt-in contract
         if: ${{ !cancelled() }}
         run: python -m unittest -v test_ziokt test_gateway test_forum_v3 test_engine_weights test_engine_governance_cli test_engine_proof_boundary test_work_weight_policy
