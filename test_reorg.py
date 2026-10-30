@@ -189,6 +189,18 @@ class ReorgTests(Fixture):
         for body in (payload.rsplit('|',1)[0]+'|00',payload+'|extra',payload.replace('|2|','|3|'),payload.replace(self.peer_identity,'0'*64)):
             self.assertEqual(announce(body)['status'],'error');self.assertEqual(self.semantic(),before)
 
+    def test_reorg_cannot_replace_a_database_held_by_native_mining(self):
+        import fcntl
+        tip=self.branch(self.remote,2,100)
+        before=self.semantic()
+        lock=pathlib.Path(self.run_core('printf "%s" "$SYSTEM_LOCK_FILE"').stdout)
+        with lock.open('a') as holder:
+            fcntl.flock(holder,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.reorganize(tip,False)
+            self.assertEqual(self.semantic(),before)
+        self.reorganize(tip)
+        self.assertEqual(self.tip(self.chain),tip)
+
     def test_interrupted_reorg_term_rolls_back_and_restart(self):
         self.branch(self.chain,2,10);self.run_core('_internal_rebuild_derived_state');before=self.semantic()
         tip=self.branch(self.remote,8,100)

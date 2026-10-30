@@ -27,7 +27,8 @@
     ],
     "Checked replay and reorganization": [
       "_internal_replay_chain_state",
-      "_blockchain_reorganize_to"
+      "_blockchain_reorganize_to",
+      "blockchain_get_latest_hash"
     ],
     "Cooperative admission and canonical application": [
       "_validate_single_transaction",
@@ -54,10 +55,11 @@
     "db_commit_transaction": "ccf3891e1ccd89a3230e8e47ac10be0f540ecb24b3bb804663a8e6e53e87ab5c",
     "_internal_db_restore_snapshot": "c6507c6d1c8742375feb4861154e0dd0724d9828f05e0f2ac5307883cd4ec539",
     "_internal_replay_chain_state": "38fffef23b408c37098f124a9d1f97a97d631851c4d948001bbc4c5f8ca845e1",
-    "_blockchain_reorganize_to": "14a2282ded0238df48e5509108cfc6272910d4f4bdf10f010f46f71990098cd4",
+    "_blockchain_reorganize_to": "08f148950b09940d07a735ac35e464d9434e1beb500fa0c8b09fa3edb70cc1ad",
+    "blockchain_get_latest_hash": "18e78594ab0794f9f14704f9c7ee3184e01b03e747315f78973dae5cc3053baa",
     "_validate_single_transaction": "aea2d1f980ed5033ecb0ba9a4f6f963a42b0663014af832ad1aa507f8c265b13",
     "blockchain_create_transaction": "b689521b22be89d511d7b5f1911784c75d3e11c375e8c17b8f70b40a329a6135",
-    "blockchain_mine_block": "76876897c6d763d5519b0340c41fce769d0e17388d75b16df1b8d407ecdd09d4",
+    "blockchain_mine_block": "5965207c4fb2e8e41488845c46a36ed0aa105324ec9356a5c12ccfacbd701727",
     "_internal_consensus_safety_check": "6336d5f7a0ad9db641ada541d316c972c4a917e1547a8180065b0db636f964f9",
     "dht_bootstrap": "0fec92c6f18f2e42093aa6fc27012b4e897720724202de57f8d7414c320af794",
     "blockchain_create_genesis_block": "fc3013d65744bc693896667d1620d6f260e349d56dfb14c53e6359bfc8d3363a",

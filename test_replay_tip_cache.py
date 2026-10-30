@@ -10,3 +10,12 @@ class ReplayTipCacheTests(Fixture):
   self.run_core('_internal_replay_chain_state 1 "'+str(replay)+'"')
   with sqlite3.connect(replay/'chain.db') as db:
    self.assertEqual(db.execute("SELECT value FROM chain_state WHERE key='chain_info'").fetchone()[0],expected+'|1')
+ def test_stale_cache_cannot_choose_a_noncanonical_mining_parent(self):
+  self.run_core('blockchain_create_transaction set_nickname \'{"nickname":"canonical-tip"}\'; blockchain_mine_block')
+  with sqlite3.connect(self.chain) as db:
+   expected=db.execute('SELECT hash FROM blocks WHERE height=1').fetchone()[0]
+   db.execute("INSERT OR REPLACE INTO chain_state VALUES('chain_info',?)",('f'*64+'|999',))
+  self.assertEqual(self.run_core('blockchain_get_latest_hash').stdout.strip(),expected)
+  self.run_core('blockchain_create_transaction set_nickname \'{"nickname":"canonical-tip-next"}\'; blockchain_mine_block')
+  with sqlite3.connect(self.chain) as db:
+   self.assertEqual(db.execute('SELECT previous_hash FROM blocks WHERE height=2').fetchone()[0],expected)

@@ -24,3 +24,9 @@ Rollback: stop consensus; restore a reviewed previous source with its matching
 signed permission. Removing permission closes mainnet admission. Do not reactivate
 an archived invalid-signature branch for availability. Preserve audit archives;
 no private key transfer or replacement is needed.
+
+Canonical mining and reorganization share the system writer lock so rollback
+snapshots cannot restore over a concurrent native commit. Mining releases that
+lock after commit and before peer broadcasts. Canonical parent reads query the
+block table rather than trusting the derived `chain_info` cache. Targeted native
+regressions cover a poisoned cache and a real held-writer-lock reorganization.

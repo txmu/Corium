@@ -36796,7 +36796,9 @@ _blockchain_reorganize_to() (
     local peer_ip="$2"
     local peer_port="$3"
 
-    acquire_lock "network"
+    acquire_lock "network" || return 1
+    # Serialize canonical database snapshots with the native producer.
+    acquire_lock "system" || return 1
     trap 'release_lock "network"' RETURN
     msg "[REORG] 开始链重组，目标链顶: $new_tip_hash (Starting chain reorganization, target tip: $new_tip_hash)"
     
@@ -36810,7 +36812,7 @@ _blockchain_reorganize_to() (
     [ "$new_tip_hash" != "$original_tip" ] || return 0
     original_weight=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT total_weight FROM blocks WHERE hash=%s;" "$original_tip") || return 1
     db_begin_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB" || return 1
-    trap 'status=$?; if ! $reorg_committed; then if [ -z "$reorg_original_fs" ]; then _rollback_filesystem_transaction || status=1; fi; db_rollback_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB"; fi; release_lock "network"; exit "$status"' EXIT
+    trap 'status=$?; if ! $reorg_committed; then if [ -z "$reorg_original_fs" ]; then _rollback_filesystem_transaction || status=1; fi; db_rollback_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB"; fi; release_lock "system"; release_lock "network"; exit "$status"' EXIT
     trap 'exit 143' TERM
     trap 'exit 130' INT
 
@@ -39868,15 +39870,8 @@ PY_ENGINE_ZERO
 # 已修订: 获取“最重”链的链顶哈希。
 # 这里现在是规范链头的唯一真实来源。
 blockchain_get_latest_hash() {
-    local chain_info
-    chain_info=$(db_query_static "$BLOCKCHAIN_DB" "SELECT value FROM chain_state WHERE key = 'chain_info';")
-    if [ -n "$chain_info" ]; then
-        echo "$chain_info" | cut -d'|' -f1
-    else
-        # Fallback for an uninitialized chain state
-        # 对未初始化的链状态进行回退处理
-        db_query_static "$BLOCKCHAIN_DB" "SELECT hash FROM blocks ORDER BY total_weight DESC, height DESC LIMIT 1;"
-    fi
+    # chain_info is a derived cache, never authority for a mining parent.
+    db_query_static "$BLOCKCHAIN_DB" "SELECT hash FROM blocks ORDER BY total_weight DESC, height DESC LIMIT 1;"
 }
 
 # Mining/validation process (PoS) with P2P broadcast
@@ -40047,6 +40042,10 @@ blockchain_mine_block() (
     if [ -z "$mining_original_fs" ] && [ -n "$CURRENT_TRANSACTION_BACKUP_PATH" ]; then _commit_transaction || return 1; fi
     db_commit_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB" || return 1
     mining_committed=true
+    # Peers may synchronously announce their next block while we broadcast.
+    # The canonical transaction is committed; do not hold its writer lock
+    # across network calls or reject those valid follow-up announcements.
+    release_lock "system" || return 1
     dht_announce_chunk "$block_hash" >/dev/null || true
     _blockchain_broadcast_new_block "$block_hash" || true
     msg "新区块 $height (哈希: $block_hash) 已本地提交；传播结果见上方日志。 (New block $height (hash: $block_hash) committed locally; see propagation results above.)"
