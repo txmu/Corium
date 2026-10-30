@@ -105,6 +105,8 @@ class GimpsConsensusTests(unittest.TestCase):
             before=db.total_changes
             job=GIMPS.native_challenge(db,'test-net','user-a')
             self.assertEqual(job['engine_id'],'gimps-ci');self.assertEqual(job['exponent'],5)
+            self.assertEqual(GIMPS.native_challenge(db,'test-net','user-a',[5])['exponent'],7)
+            self.assertFalse(GIMPS.native_challenge(db,'test-net','user-a',[5,7])['available'])
             self.assertEqual(db.total_changes,before,'challenge must remain read-only')
             db.execute("UPDATE problem_sets SET metadata=?",(json.dumps({'start_exponent':2,'end_exponent':127}),))
             _,residue=GIMPS.lucas_lehmer_verify(67,0)

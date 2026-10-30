@@ -31,3 +31,12 @@ class ReplayTipCacheTests(Fixture):
   with sqlite3.connect(self.chain) as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM transactions').fetchone()[0],0)
   self.run_core("blockchain_create_transaction set_nickname '{\"nickname\":\"writer-unlocked\"}'")
   with sqlite3.connect(self.chain) as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM transactions').fetchone()[0],1)
+
+ def test_busy_writer_defers_mining_without_fatal_daemon_exit(self):
+  import fcntl
+  path=self.run_core('printf "%s" "$SYSTEM_LOCK_FILE"').stdout
+  with open(path,'a') as holder:
+   fcntl.flock(holder,fcntl.LOCK_EX|fcntl.LOCK_NB)
+   result=self.run_core('blockchain_mine_block')
+   self.assertIn('defer mining',result.stdout+result.stderr)
+  self.assertEqual(sqlite3.connect(self.chain).execute('SELECT MAX(height) FROM blocks').fetchone()[0],0)
