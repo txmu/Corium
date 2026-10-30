@@ -32714,6 +32714,9 @@ dht_add_node() {
     # The 'trust_tier' column will automatically be set to its default value (3) upon insertion.
     # 'trust_tier' 列在插入时会自动被设置为其默认值 (3)。
     db_execute_safe "$DHT_DB" \
+        "DELETE FROM nodes WHERE address_type=%s AND address=%s AND port=${port} AND id!=%s;" \
+        "$address_type" "$address" "$node_id" || true
+    db_execute_safe "$DHT_DB" \
         "INSERT INTO nodes (id, address_type, address, port, capabilities, last_seen, distance) VALUES (%s, %s, %s, ${port}, %s, %d, %s) ON CONFLICT(id) DO UPDATE SET address_type=excluded.address_type, address=excluded.address, port=excluded.port, capabilities=excluded.capabilities, last_seen=excluded.last_seen, distance=excluded.distance;" \
         "$node_id" "$address_type" "$address" "$capabilities" "$timestamp" "$distance"
 
@@ -33454,14 +33457,6 @@ _consensus_daemon_loop() {
         else
             # --- 传统 PoS 模式（高度 < 64 历史兼容）：基于权益轮值出块 ---
             # --- Legacy PoS Mode (< height 64 historical compatibility): Staked round-robin ---
-            local our_stake
-            our_stake=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT stake FROM validators WHERE public_key = %s AND status = 'active';" "$our_pubkey")
-            [ -z "$our_stake" ] || [ "${our_stake:-0}" -le 0 ] && {
-                detail "[CONSENSUS-DAEMON] 非活跃验证者，进入监听模式。 / Not an active validator, entering listening mode."
-                sleep 30
-                continue
-            }
-
             local next_validator_pubkey
             next_validator_pubkey=$(blockchain_get_next_validator)
             if [ -z "$next_validator_pubkey" ]; then
@@ -33474,6 +33469,13 @@ _consensus_daemon_loop() {
                 info "[CONSENSUS-DAEMON] 轮到我们为区块 $candidate_height 提议了。/ It is our turn to propose block $candidate_height."
                 blockchain_mine_block
             else
+                local our_stake
+                our_stake=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT stake FROM validators WHERE public_key = %s AND status = 'active';" "$our_pubkey")
+                [ -z "$our_stake" ] || [ "${our_stake:-0}" -le 0 ] && {
+                    detail "[CONSENSUS-DAEMON] 非活跃验证者，进入监听模式。 / Not an active validator, entering listening mode."
+                    sleep 30
+                    continue
+                }
                 local next_validator_id
                 next_validator_id=$(_internal_hash_text "$next_validator_pubkey")
                 info "[CONSENSUS-DAEMON] 正在等待验证者 ${next_validator_id:0:16}... 为区块 $candidate_height 提议... / Waiting for validator ${next_validator_id:0:16}... to propose block $candidate_height..."
@@ -35184,7 +35186,7 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
             peer=db_query_ro(DHT_DB_PATH,'SELECT address,port FROM nodes WHERE id=?',(sender_id,),fetch_one=True)
             if not peer or not peer[1]: return {"status":"error","message":"Announcer address unavailable"}
             proc=subprocess.Popen(['bash','-c','source "$1"; _blockchain_reorganize_to "$2" "$3" "$4"','corium-announcement',SCRIPT_PATH,digest,peer[0],str(peer[1])],stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
-            try: output,errors=proc.communicate(timeout=90)
+            try: output,errors=proc.communicate(timeout=600)
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid,signal.SIGTERM)
                 try: proc.communicate(timeout=10)
@@ -36826,11 +36828,15 @@ _blockchain_reorganize_to() (
 
     # --- 步骤 2: 回滚本地链到共同祖先 ---
     # --- Step 2: Roll back the local chain to the common ancestor ---
-    info "正在回滚本地无效的区块... (Rolling back local invalid blocks...)"
-    _corium_work_consensus fork-guard "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$ancestor_hash" >/dev/null || return 1
-    _rollback_to_ancestor "$local_tip_hash" "$ancestor_hash" || return 1
-    _internal_rebuild_derived_state || return 1
-    info "本地链已回滚。 (Local chain reverted.)"
+    if [ "$local_tip_hash" != "$ancestor_hash" ]; then
+        info "正在回滚本地无效的区块... (Rolling back local invalid blocks...)"
+        _corium_work_consensus fork-guard "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$ancestor_hash" >/dev/null || return 1
+        _rollback_to_ancestor "$local_tip_hash" "$ancestor_hash" || return 1
+        _internal_rebuild_derived_state || return 1
+        info "本地链已回滚。 (Local chain reverted.)"
+    else
+        detail "[REORG] 本地链顶即为共同祖先，无需回滚。 (Local tip is common ancestor, fast-forwarding.)"
+    fi
 
     # --- 步骤 3: 获取、验证并应用新链的区块 ---
     # --- Step 3: Fetch, VALIDATE, and apply blocks from the new chain ---
@@ -36882,13 +36888,15 @@ _blockchain_reorganize_to() (
         info "  -> 验证区块签名... (Verifying block signature...)"
         local block_content_to_verify="{\"height\":$height,\"previous_hash\":\"$prev_hash\",\"timestamp\":$ts,\"transactions\":$tx_json_str}"
         local work_mode work_check=""
+        # Apply already-governed changes before selecting the verifier, as the
+        # native producer does on the activation block.
+        _protocol_execute_scheduled_changes "$height" || return 1
         work_mode=$(_corium_work_consensus mode "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$height" | jq -er .mode) || return 1
         if [ "$work_mode" = pow-v2 ]; then
             work_check=$(_corium_work_consensus verify "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$block_content_json" "$block_to_apply") || return 1
         else
             jq -e 'has("work")|not' <<< "$block_content_json" >/dev/null || return 1
         
-        _protocol_execute_scheduled_changes "$height" || return 1
         _slashing_check_for_jailed_validators "$height" || return 1
         local validator_public_key_file
         validator_public_key_file=$(_blockchain_get_validator_pubkey "$validator_id")
@@ -55501,6 +55509,9 @@ PY_SAVE_BLOCKS
         done < <(jq -r '.[]' <<< "$transactions")
         _update_chain_state_cache || return 1
         db_execute_safe "$BLOCKCHAIN_DB" "UPDATE validators SET last_block=%d WHERE public_key_hash=%s;" "$bh" "$validator" || return 1
+        # The replay tip cache must follow the verified canonical prefix.
+        # A stale genesis cache would make the next native block fork at H1.
+        db_execute_safe "$BLOCKCHAIN_DB" "INSERT OR REPLACE INTO chain_state VALUES ('chain_info',%s);" "$hash|$bh" || return 1
         parent_weight="$weight"; parent_time="$timestamp"
     done < <(jq -c '.[]' "$later_blocks")
 

@@ -45,6 +45,9 @@ except ImportError:
 def _verify_recovery_auth(auth, path_context=None):
     if not isinstance(auth, dict):
         return False
+    if auth.get('schema') == 'ziokt.native-rebuild-authorization.v1':
+        from rebuild_authorization import verify
+        return verify(auth)
     required_keys = {
         'schema', 'network_id', 'chain_id', 'genesis_hash',
         'anchor_h50_hash', 'recovery_h51_hash', 'approved_checkpoint_height',
