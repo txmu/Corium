@@ -276,3 +276,19 @@ class StunDiscoveryTests(unittest.TestCase):
         self.assertEqual((namespace['PUBLIC_IP'],namespace['PUBLIC_PORT']),('198.18.0.1',54321))
 
 if __name__=='__main__': unittest.main(verbosity=2)
+
+class AddressMobilityTests(GatewayTests):
+    def test_signed_socket_address_moves_existing_identity_and_rejects_replay(self):
+        self.handler.client_address=('13.112.54.178',45123)
+        result=self.rpc('ANNOUNCE_ADDRESS',{'port':7234,'timestamp':int(time.time())})
+        self.assertEqual(result.get('data'),'ADDRESS_UPDATED')
+        with sqlite3.connect(self.dht) as db:
+            self.assertEqual(db.execute('SELECT address,port FROM nodes WHERE id=?',(self.identity,)).fetchone(),('13.112.54.178',7234))
+        self.handler.client_address=('8.8.8.8',9999)
+        self.assertEqual(self.rpc('ANNOUNCE_ADDRESS',{'port':7235,'timestamp':int(time.time())+1})['status'],'success')
+        self.assertEqual(self.rpc('ANNOUNCE_ADDRESS',{'port':7234,'timestamp':int(time.time())-300})['status'],'error')
+        self.assertEqual(self.rpc('ANNOUNCE_ADDRESS',{'port':7234,'timestamp':int(time.time())},ec.generate_private_key(ec.SECP256K1()))['status'],'error')
+        self.handler.client_address=('127.0.0.1',9999)
+        self.assertEqual(self.rpc('ANNOUNCE_ADDRESS',{'port':7234,'timestamp':int(time.time())})['status'],'error')
+        with sqlite3.connect(self.dht) as db:
+            self.assertEqual(db.execute('SELECT address,port FROM nodes WHERE id=?',(self.identity,)).fetchone(),('8.8.8.8',7235))

@@ -31919,17 +31919,70 @@ _parse_full_address() {
 # Discovers and returns all available public network identities for the local machine.
 # @output 格式: "type1:address1|type2:address2|..." e.g., "ipv4:1.2.3.4|ipv6:2001::1"
 # @output Format: "type1:address1|type2:address2|..." e.g., "ipv4:1.2.3.4|ipv6:2001::1"
+# Public address changes never rotate the node signing or transport keys.
+_corium_public_address() {
+    "${PYTHON_CMD:-python3}" - "$P2P_DIR" "${CORIUM_CONFIG_CACHE[p2p_public_address_mode]:-auto}" "${CORIUM_CONFIG_CACHE[p2p_public_ip]:-}" <<'PY_CORIUM_PUBLIC_ADDRESS'
+import fcntl,ipaddress,json,os,sys,time
+from pathlib import Path
+from urllib.request import build_opener,ProxyHandler,HTTPSHandler,HTTPRedirectHandler
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs):return None
+def address(raw):
+    value=ipaddress.ip_address(raw)
+    if not value.is_global or value.version!=4:raise ValueError('global IPv4 required')
+    return str(value)
+root,mode,configured=sys.argv[1:]
+if mode=='manual':
+    print(address(configured));raise SystemExit
+root=Path(root);root.mkdir(parents=True,exist_ok=True)
+cache=root/'public-address.json';lock=root/'public-address.lock'
+fd=os.open(lock,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'w') as guard:
+    fcntl.flock(guard,fcntl.LOCK_EX)
+    now=time.time()
+    try:
+        value=json.loads(cache.read_text())
+        if 0<=now-value['observed_at']<300:
+            print(address(value['address']));raise SystemExit
+        if 0<=now-value.get('attempted_at',0)<30:raise SystemExit(1)
+    except (OSError,ValueError,KeyError,TypeError):value={}
+    opener=build_opener(ProxyHandler({}),HTTPSHandler(),NoRedirect())
+    for source in ('https://api.ipify.org','https://checkip.amazonaws.com'):
+        try:
+            with opener.open(source,timeout=2) as response:raw=response.read(65)
+            if len(raw)>64:raise ValueError('address response budget')
+            found=address(raw.decode('ascii').strip())
+            value={'address':found,'observed_at':now,'attempted_at':now,'source':source}
+            break
+        except (OSError,ValueError,UnicodeError):continue
+    else:
+        value={'attempted_at':now}
+    temp=cache.with_suffix('.new')
+    out=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+    with os.fdopen(out,'w') as target:json.dump(value,target)
+    os.replace(temp,cache)
+    if 'address' not in value:raise SystemExit(1)
+    print(value['address'])
+PY_CORIUM_PUBLIC_ADDRESS
+}
+
 _discover_network_identities() {
     local -a identities=()
     local probe_timeout="2s"
 
-    # --- 1. 发现 IPv4 / 1. Discover IPv4 ---
+    # Prefer a bounded public observation over a private cloud interface route.
+    # Explicit manual mode is available for intentional public NAT mappings.
     local ipv4_addr
-    ipv4_addr=$(timeout "$probe_timeout" ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+    ipv4_addr=$(_corium_public_address 2>/dev/null) || ipv4_addr=""
+    if [ -z "$ipv4_addr" ]; then
+        ipv4_addr=$(timeout "$probe_timeout" ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++)if($i=="src"){print $(i+1);exit}}')
+    fi
     if [ -z "$ipv4_addr" ]; then
         ipv4_addr=$(timeout "$probe_timeout" ip route get 223.5.5.5 2>/dev/null | awk '{print $7; exit}')
     fi
-    [ -n "$ipv4_addr" ] && identities+=("ipv4:${ipv4_addr}")
+    if [ -n "$ipv4_addr" ] && "${PYTHON_CMD:-python3}" -c 'import ipaddress,sys;sys.exit(not ipaddress.ip_address(sys.argv[1]).is_global)' "$ipv4_addr" 2>/dev/null; then
+        identities+=("ipv4:${ipv4_addr}")
+    fi
 
     # --- 2. 发现 IPv6 (如果启用且系统支持) / 2. Discover IPv6 (if enabled and supported by system) ---
     if [ "${CORIUM_CONFIG_CACHE[p2p_announce_ipv6]:-}" = "true" ] && ip -6 addr show scope global | grep -q "inet6"; then
@@ -35186,6 +35239,44 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
 
         bilingual_print(f"Received valid DHT message: type={msg_type} from {sender_id[:12]}", f"收到来自 {sender_id[:12]} 的有效 DHT 消息: 类型={msg_type}", "DEBUG")
         
+        if msg_type == "ANNOUNCE_ADDRESS":
+            # The signed payload supplies the listening port; the socket supplies
+            # the address. Never accept forwarded headers or an advertised host.
+            try:
+                import ipaddress
+                claim=json.loads(payload)
+                if set(claim)!={'port','timestamp'} or type(claim['port']) is not int or not 1<=claim['port']<=65535 or type(claim['timestamp']) is not int or abs(time.time()-claim['timestamp'])>120:
+                    raise ValueError('address claim')
+                observed=ipaddress.ip_address(self.client_address[0])
+                if not observed.is_global:raise ValueError('public source required')
+                kind='ipv4' if observed.version==4 else 'ipv6'
+                previous=db_query_ro(DHT_DB_PATH,'SELECT address,port,last_seen FROM nodes WHERE id=?',(sender_id,),fetch_one=True)
+                if previous and (claim['timestamp']<previous[2] or (claim['timestamp']==previous[2] and (str(observed),claim['port'])!=(previous[0],previous[1]))):
+                    return {"status":"error","message":"Stale address update"}
+                # Carry the already pinned transport certificate across an
+                # authenticated identity's address change, preserving TOFU pins.
+                if previous and PEER_CERT_CACHE:
+                    from pathlib import Path
+                    old=Path(PEER_CERT_CACHE)/(str(previous[0]).replace(':','_')+'_'+str(previous[1])+'.pem')
+                    new=Path(PEER_CERT_CACHE)/(str(observed).replace(':','_')+'_'+str(claim['port'])+'.pem')
+                    if old.is_file() and old!=new:
+                        pin=old.read_bytes()
+                        if len(pin)>65536:raise ValueError('certificate budget')
+                        if new.exists() and new.read_bytes()!=pin:
+                            return {"status":"error","message":"Address certificate pin conflict"}
+                        if not new.exists():
+                            fd=os.open(new,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+                            with os.fdopen(fd,'wb') as target:target.write(pin)
+                query="""INSERT INTO nodes(id,address_type,address,port,capabilities,last_seen,distance)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                    address_type=excluded.address_type,address=excluded.address,port=excluded.port,last_seen=excluded.last_seen WHERE excluded.last_seen>=nodes.last_seen"""
+                with db_lock:
+                    if not ipc_write_to_db(DHT_DB_PATH,query,(sender_id,kind,str(observed),claim['port'],'{}',claim['timestamp'],str(int(sender_id,16)^int(my_id,16)))):
+                        return {"status":"error","message":"Address update persistence failed"}
+                return {"status":"success","data":"ADDRESS_UPDATED"}
+            except (OSError,ValueError,TypeError,KeyError,AttributeError):
+                return {"status":"error","message":"Invalid address update"}
+
         if msg_type == "PING":
             return {"status": "success", "data": f"PONG:{get_our_node_id()}"}
 
@@ -37126,42 +37217,18 @@ _find_common_ancestor() {
 # Rolls back the local blockchain to a specific ancestor block.
 # 将本地区块链回滚到指定的祖先区块。
 _rollback_to_ancestor() {
-    local current_tip="$1"
-    local ancestor_hash="$2"
-    
-    local ancestor_height current_height
+    local current_tip="$1" ancestor_hash="$2" ancestor_height current_height
     ancestor_height=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT height FROM blocks WHERE hash=%s;" "$ancestor_hash") || return 1
     current_height=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT height FROM blocks WHERE hash=%s;" "$current_tip") || return 1
     [[ "$ancestor_height" =~ ^[0-9]+$ && "$current_height" =~ ^[0-9]+$ ]] && [ "$ancestor_height" -le "$current_height" ] || return 1
+    [ "$current_height" = "$(db_query_static "$BLOCKCHAIN_DB" "SELECT MAX(height) FROM blocks;")" ] || return 1
     info "[DB-TX] 开始批量回滚数据库事务... (Starting bulk database rollback transaction...)"
-    db_begin_transaction "$BLOCKCHAIN_DB"
-
-    local current_hash="$current_tip"
-    while [ "$current_hash" != "$ancestor_hash" ]; do
-        detail "  -> 准备回滚区块 (Queuing revert for block): ${current_hash:0:16}..."
-        local tx_json parent_hash
-        tx_json=$(db_query_safe "$BLOCKCHAIN_DB" \
-            "SELECT transactions FROM blocks WHERE hash = %s;" \
-            "$current_hash")
-        parent_hash=$(db_query_safe "$BLOCKCHAIN_DB" \
-            "SELECT previous_hash FROM blocks WHERE hash = %s;" \
-            "$current_hash")
-        
-        mapfile -t tx_hashes < <(echo "$tx_json" | grep -o '"[^"]*"' | tr -d '"')
-        for tx_hash in "${tx_hashes[@]}"; do
-            db_execute_safe "$BLOCKCHAIN_DB" \
-                "UPDATE transactions SET block_height = NULL WHERE hash = %s;" \
-                "$tx_hash"
-        done
-        
-        db_execute_safe "$BLOCKCHAIN_DB" \
-            "DELETE FROM blocks WHERE hash = %s;" \
-            "$current_hash"
-        current_hash="$parent_hash"
-        [[ "$current_hash" =~ ^[a-f0-9]{64}$ ]] || return 1
-    done
-
-    db_commit_transaction "$BLOCKCHAIN_DB"
+    db_begin_transaction "$BLOCKCHAIN_DB" || return 1
+    # Remove the whole suffix by canonical height, including rows above a local
+    # storage gap. The replacement branch still requires full native admission.
+    db_execute_safe "$BLOCKCHAIN_DB" "UPDATE transactions SET block_height=NULL WHERE block_height>%d;" "$ancestor_height" || return 1
+    db_execute_safe "$BLOCKCHAIN_DB" "DELETE FROM blocks WHERE height>%d;" "$ancestor_height" || return 1
+    db_commit_transaction "$BLOCKCHAIN_DB" || return 1
     info "[DB-TX] 数据库事务提交，回滚完成。 (Database transaction committed, rollback complete.)"
 }
 
@@ -38262,9 +38329,76 @@ def main(args):
 
 
 
+"""Restore only the exact state committed by an existing signed DNA declaration."""
+def replay_anchor(database,network,requested,state_path,chain_path,application_path):
+    import stat,os,re
+    declaration=Recovery.declaration(network)
+    require(declaration is not None and declaration['protocol']==Recovery.SIDE,'DNA recovery declaration required')
+    checkpoint=declaration['checkpoint'];height=checkpoint['height']
+    require(type(requested)is int and requested>=height,'checkpoint must precede replay height')
+    path=Path(state_path);info=path.lstat()
+    require(stat.S_ISREG(info.st_mode) and not info.st_mode&0o077 and info.st_uid in (0,os.geteuid()) and info.st_size<=64*1024*1024,'private bounded recovery baseline required')
+    def unique(pairs):
+        result={}
+        for key,value in pairs:
+            require(key not in result,'duplicate baseline key');result[key]=value
+        return result
+    state=json.loads(path.read_text(),object_pairs_hook=unique)
+    require(hashlib.sha256(DNA.encoded(state)).hexdigest()==declaration['initial_state_root'],'signed initial state root differs')
+    require(set(state)-{'_custom_schemas'}=={'chain','application'},'exact baseline state fields')
+    initial_blocks=state['chain']['blocks']
+    require(len(initial_blocks)==height+1 and sorted(row['height'] for row in initial_blocks)==list(range(height+1)),'complete signed archive prefix required')
+    anchor=next(row for row in initial_blocks if row['height']==height)
+    require(anchor['hash']==checkpoint['hash'],'signed checkpoint anchor differs')
+    with sqlite3.connect(database) as source:
+        require(source.execute('SELECT hash FROM blocks WHERE height=?',(height,)).fetchone()==(checkpoint['hash'],),'accepted archive checkpoint required')
+    with sqlite3.connect(chain_path) as db:
+        later_blocks=db.execute('SELECT * FROM blocks WHERE height>? ORDER BY height',(height,)).fetchall()
+        later_transactions=db.execute('SELECT * FROM transactions WHERE block_height>?',(height,)).fetchall()
+        has_work=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='block_work'").fetchone()
+        later_work=db.execute('SELECT w.* FROM block_work w JOIN blocks b ON b.hash=w.hash WHERE b.height>?',(height,)).fetchall() if has_work else []
+        work_sql=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='block_work'").fetchone() if has_work else None
+    def cell(value):
+        if type(value)is dict:
+            require(set(value)=={'$corium_blob'} and type(value['$corium_blob'])is str,'typed baseline blob required')
+            return bytes.fromhex(value['$corium_blob'])
+        require(value is None or type(value)in (str,int),'baseline scalar required')
+        return value
+    source_application=Path(database).parent.parent/'forum/forum.db'
+    for label,target,original in [('chain',chain_path,database),('application',application_path,source_application)]:
+        with sqlite3.connect(Path(original).absolute().as_uri()+'?mode=ro',uri=True) as source:
+            native_schemas=dict(source.execute("SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
+        schemas={table:native_schemas[table] for table in state[label] if table in native_schemas}
+        schemas.update(state.get('_custom_schemas',{}).get(label,{}))
+        with sqlite3.connect(target) as db:
+            for table,sql in schemas.items():
+                require(re.fullmatch('[A-Za-z_][A-Za-z_0-9]*',table) and type(sql)is str and len(sql)<=65536,'bounded baseline table schema required')
+                require(re.match(r'\ACREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`\[]?'+re.escape(table)+r'["`\]]?\s*\(',sql,re.I) and ';' not in sql.rstrip().rstrip(';'),'one literal baseline table schema required')
+                if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():db.execute(sql)
+            for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall():
+                require(re.fullmatch('[A-Za-z_][A-Za-z_0-9]*',table),'native table name required');db.execute('DELETE FROM "'+table+'"')
+            for table,rows in state[label].items():
+                require(re.fullmatch('[A-Za-z_][A-Za-z_0-9]*',table) and type(rows)is list,'baseline table rows required')
+                columns=[row[1] for row in db.execute('PRAGMA table_info("'+table+'")')]
+                require(columns,'native baseline table unavailable: '+label+'/'+table)
+                for row in rows:
+                    require(type(row)is dict and set(row)==set(columns),'exact native baseline columns required')
+                    db.execute('INSERT INTO "'+table+'" VALUES('+','.join('?' for _ in columns)+')',[cell(row[column]) for column in columns])
+            if label=='chain':
+                db.executemany('INSERT INTO blocks VALUES(?,?,?,?,?,?,?,?)',later_blocks)
+                db.executemany('INSERT INTO transactions VALUES(?,?,?,?,?,?,?)',later_transactions)
+                if later_work:
+                    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='block_work'").fetchone():db.execute(work_sql[0])
+                    db.executemany('INSERT OR REPLACE INTO block_work VALUES('+','.join('?' for _ in later_work[0])+')',later_work)
+                db.execute("INSERT OR REPLACE INTO chain_state VALUES('chain_info',?)",(checkpoint['hash']+'|'+str(height),))
+                db.execute("INSERT OR REPLACE INTO chain_state VALUES('last_processed_height',?)",(str(height),))
+    return {'height':height,'hash':checkpoint['hash'],'initial_state_root':declaration['initial_state_root']}
+
 import sys
 try:
-    main(sys.argv[1:])
+    if sys.argv[1]=='replay-anchor':
+        result=replay_anchor(sys.argv[2],sys.argv[3],int(sys.argv[4]),*sys.argv[5:8]);print(json.dumps(result,separators=(',',':')))
+    else:main(sys.argv[1:])
 except (ValueError,TypeError,KeyError,InvalidSignature,sqlite3.Error):
     print('WORK_CONSENSUS_REJECTED',file=sys.stderr)
     raise SystemExit(2)
@@ -45100,7 +45234,8 @@ load_config() {
     CORIUM_CONFIG_CACHE[p2p_i2p_proxy]="${P2P_I2P_PROXY}"
     CORIUM_CONFIG_CACHE[p2p_onion_service_address]="${P2P_ONION_SERVICE_ADDRESS}"
     CORIUM_CONFIG_CACHE[p2p_i2p_destination]="${P2P_I2P_DESTINATION}"
-    CORIUM_CONFIG_CACHE[p2p_public_ip]="" # 新增：默认为空
+    CORIUM_CONFIG_CACHE[p2p_public_ip]="" # manual NAT mapping only
+    CORIUM_CONFIG_CACHE[p2p_public_address_mode]="auto"
     CORIUM_CONFIG_CACHE[p2p_tls_ech_enabled]="${TLS_ECH_ENABLED:-false}"
     CORIUM_CONFIG_CACHE[p2p_tls_no_sni_client]="${TLS_NO_SNI_CLIENT:-true}"
     # --- [功能补完] 预加载引导节点配置 (默认为空字符串) ---
@@ -55514,24 +55649,32 @@ if pathlib.Path(sys.argv[5]).exists():
     with sqlite3.connect(sys.argv[5]) as lookup, sqlite3.connect(sys.argv[4]) as replay:
         replay.executemany('INSERT OR REPLACE INTO local_chunks VALUES (?,?,?,?)', lookup.execute('SELECT * FROM local_chunks'))
 PY_HISTORY
-    # Seed the original genesis assets while retaining the copied canonical genesis row.
+    local replay_start_height=0 anchor_file="${USER_IDENTITY_FILE%/*}/recovery-state.json" anchor_result
+    if [ -f "$anchor_file" ]; then
+        anchor_result=$(_corium_work_consensus replay-anchor "$source_chain" "$CORIUM_NETWORK_ID" "$height" "$anchor_file" "$BLOCKCHAIN_DB" "$FORUM_DB") || return 1
+        replay_start_height=$(jq -er .height <<< "$anchor_result") || return 1
+    fi
+    # Seed genesis normally, or retain the exact signed DNA archive baseline.
     local genesis_row
     genesis_row=$(db_query_static "$BLOCKCHAIN_DB" "SELECT json_array(height,hash,previous_hash,timestamp,validator,signature,transactions,total_weight) FROM blocks WHERE height=0;")
     local later_blocks="$replay_dir/later_blocks.json"
-    "${PYTHON_CMD}" - "$BLOCKCHAIN_DB" "$later_blocks" <<'PY_SAVE_BLOCKS'
+    "${PYTHON_CMD}" - "$BLOCKCHAIN_DB" "$later_blocks" "$replay_start_height" <<'PY_SAVE_BLOCKS'
 import sqlite3,sys,json
 with sqlite3.connect(sys.argv[1]) as db:
-    rows=db.execute('SELECT * FROM blocks WHERE height>0 ORDER BY height').fetchall()
+    rows=db.execute('SELECT * FROM blocks WHERE height>? ORDER BY height',(int(sys.argv[3]),)).fetchall()
     open(sys.argv[2],'w').write(json.dumps(rows))
-    db.execute('DELETE FROM blocks')
+    if int(sys.argv[3])==0:db.execute('DELETE FROM blocks')
+    else:db.execute('DELETE FROM blocks WHERE height>?',(int(sys.argv[3]),))
 PY_SAVE_BLOCKS
-    db_execute_safe "$BLOCKCHAIN_DB" "UPDATE transactions SET block_height=NULL;" || return 1
-    blockchain_create_genesis_block || return 1
+    db_execute_safe "$BLOCKCHAIN_DB" "UPDATE transactions SET block_height=NULL WHERE block_height>%d;" "$replay_start_height" || return 1
+    if [ "$replay_start_height" -eq 0 ]; then blockchain_create_genesis_block || return 1; fi
     local expected_genesis_hash
     expected_genesis_hash=$(db_query_static "$BLOCKCHAIN_DB" "SELECT hash FROM blocks WHERE height=0;") || return 1
     [ "$expected_genesis_hash" = "$(jq -r '.[1]' <<< "$genesis_row")" ] || return 1
-    _update_chain_state_cache || return 1
+    if [ "$replay_start_height" -eq 0 ]; then _update_chain_state_cache || return 1; fi
     local block_row bh hash previous timestamp validator signature transactions weight parent_weight=0 parent_time=0 pubfile body txhash
+    parent_weight=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT total_weight FROM blocks WHERE height=%d;" "$replay_start_height") || return 1
+    parent_time=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT timestamp FROM blocks WHERE height=%d;" "$replay_start_height") || return 1
     local -A replay_validations=()
     while IFS= read -r block_row; do
         bh=$(jq -er '.[0]' <<< "$block_row") || return 1
