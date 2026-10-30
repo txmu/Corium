@@ -25,6 +25,10 @@
       "db_commit_transaction",
       "_internal_db_restore_snapshot"
     ],
+    "Empty block event dispatch": [
+      "_internal_empty_event_window",
+      "_update_chain_state_cache"
+    ],
     "Checked replay and reorganization": [
       "_internal_replay_chain_state",
       "_blockchain_reorganize_to",
@@ -55,6 +59,8 @@
     "db_begin_transaction": "f737c9e2c5373e7bb652f4cfc846d7fb850403273f3a13f93ddd0a9bcb0dfa7b",
     "db_commit_transaction": "ccf3891e1ccd89a3230e8e47ac10be0f540ecb24b3bb804663a8e6e53e87ab5c",
     "_internal_db_restore_snapshot": "c6507c6d1c8742375feb4861154e0dd0724d9828f05e0f2ac5307883cd4ec539",
+    "_internal_empty_event_window": "3e59b279dd9bd00a23b3965bcd2f89b3c923ed577453476ab1392e79d16c823b",
+    "_update_chain_state_cache": "21aaf16fe3dec3497aa532ca582a43c66ab5349e4c9e96ce4926f9000fd836fd",
     "_internal_replay_chain_state": "93afcccc25852d3620ae7e52f38e47ddb1b0eaf61ae35782ce432cabf7399d15",
     "_blockchain_reorganize_to": "537fdfb2c4c74f4621ccb02b39e4dc62c3f1ef941fa9a1c95835d92ae05ca4f3",
     "blockchain_get_latest_hash": "18e78594ab0794f9f14704f9c7ee3184e01b03e747315f78973dae5cc3053baa",

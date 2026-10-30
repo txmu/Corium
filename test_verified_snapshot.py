@@ -19,3 +19,14 @@ class VerifiedSnapshotTests(Fixture):
         with sqlite3.connect(snapshot) as db:db.execute("UPDATE blocks SET signature='00' WHERE height=2")
         run(False);self.assertEqual(self.semantic(),before)
         self.assertEqual((self.etc/'identity.key').read_bytes(),key)
+
+    def test_event_window_falls_back_for_pending_proofs_and_group_votes(self):
+        self.run_core('_internal_empty_event_window 1 2')
+        with sqlite3.connect(self.chain) as db:
+            db.execute('INSERT INTO pending_proofs VALUES(?,?,?,?,?)',('p','a'*64,self.identity,'{}',900))
+        self.run_core('_internal_empty_event_window 1 2',False)
+        with sqlite3.connect(self.chain) as db:
+            db.execute('DELETE FROM pending_proofs')
+            db.execute('INSERT INTO transactions VALUES(?,?,?,?,?,?,?)',('a'*64,'group_propose_owner','{}','00',self.pem,1,1))
+        self.run_core('_internal_empty_event_window 500 501',False)
+        self.run_core('_internal_empty_event_window 502 503')

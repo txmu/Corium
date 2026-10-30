@@ -36,7 +36,7 @@ class DNAReplayAnchorTests(Fixture):
 
     def test_empty_batch_matches_serial_replay_and_rejects_bad_signature(self):
         batched=self.root/'batch';serial=self.root/'serial';batched.mkdir();serial.mkdir()
-        self.run_core('_internal_replay_chain_state 786 "'+str(batched)+'"; CORIUM_REPLAY_BATCH_DISABLE=1 _internal_replay_chain_state 786 "'+str(serial)+'"')
+        self.run_core('_internal_replay_chain_state 786 "'+str(batched)+'"; CORIUM_REPLAY_BATCH_DISABLE=1 CORIUM_EVENT_WINDOW_DISABLE=1 _internal_replay_chain_state 786 "'+str(serial)+'"')
         left=self.run_core('BLOCKCHAIN_DB="'+str(batched/'chain.db')+'"; FORUM_DB="'+str(batched/'forum.db')+'"; _internal_semantic_state').stdout
         right=self.run_core('BLOCKCHAIN_DB="'+str(serial/'chain.db')+'"; FORUM_DB="'+str(serial/'forum.db')+'"; _internal_semantic_state').stdout
         self.assertEqual(json.loads(left.splitlines()[-1]),json.loads(right.splitlines()[-1]))

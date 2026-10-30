@@ -54232,6 +54232,28 @@ _internal_agent_event_dispatch() {
 # 取代 _sync_social_state()。此函数是构建应用层状态的唯一真相来源。
 # 此版本经过深度优化，包含了一个用于激活 Agent 的集束化事件分发系统，
 # 并整合了用于第三代应用的动态执行引擎。
+# A window with no eligible events has no per-height state transitions.
+# Any uncertain schema or pending queue uses the original per-height dispatcher.
+_internal_empty_event_window() {
+    [ "${CORIUM_EVENT_WINDOW_DISABLE:-0}" != 1 ] || return 1
+    "${PYTHON_CMD}" - "$BLOCKCHAIN_DB" "$FORUM_DB" "$1" "$2" <<'PY_EMPTY_EVENTS'
+import sqlite3,sys
+from contextlib import closing
+try:
+    start,end=map(int,sys.argv[3:5])
+    with closing(sqlite3.connect(sys.argv[1])) as db,closing(sqlite3.connect(sys.argv[2])) as app:
+        for table in ('pending_proofs','challenges','scheduled_state_changes','ibc_incoming_queue'):
+            if db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone():raise ValueError('pending events')
+        if db.execute("SELECT 1 FROM validators WHERE status='jailed' LIMIT 1").fetchone():raise ValueError('jailed validator')
+        if app.execute('SELECT 1 FROM nns_auctions LIMIT 1').fetchone():raise ValueError('auction events')
+        kinds=('validator_propose_addition','validator_propose_removal','propose_app_template','propose_ibc_verifier','propose_new_compute_engine','propose_federation_key')
+        for offset in (100,110):
+            if db.execute('SELECT 1 FROM transactions WHERE type IN ('+','.join('?' for _ in kinds)+') AND block_height+? BETWEEN ? AND ? LIMIT 1',(*kinds,offset,start,end)).fetchone():raise ValueError('governance event')
+        if db.execute("SELECT 1 FROM transactions WHERE type IN ('group_propose_owner','group_propose_admin') AND block_height+500 BETWEEN ? AND ? LIMIT 1",(start,end)).fetchone():raise ValueError('group event')
+except (ValueError,sqlite3.Error):raise SystemExit(1)
+PY_EMPTY_EVENTS
+}
+
 _update_chain_state_cache() {
     # Paths are already resolved by the dispatcher or isolated replay caller.
     # 路径由命令分发器或隔离重放调用者确定，不能在重放中切回当前节点。
@@ -54892,6 +54914,7 @@ _update_chain_state_cache() {
 
         # 处理最后一个区块到链顶之间的所有区块级事件
         # Process block-level events for the last block up to the chain tip
+        if ! _internal_empty_event_window "$((current_processing_height < 0 ? 0 : current_processing_height))" "$current_chain_height"; then
         for (( h = current_processing_height < 0 ? 0 : current_processing_height; h <= current_chain_height; h++ )); do
              detail "[状态机] 正在处理区块 ${h} 的区块级事件... / [State Engine] Processing block-level events for block ${h}..."
             # _resolve_proofs_and_challenges_at_height is called by _process_onchain_events_at_height
@@ -54902,6 +54925,7 @@ _update_chain_state_cache() {
             # _group_tally_admin_votes_at_height is called by _process_onchain_events_at_height
             _process_onchain_events_at_height "$h"
         done
+        fi
         
         # _begin_db_transaction 设置了 trap '...' ERR，如果上面的管道块失败，会自动回滚。
         # 如果管道成功执行到这里，我们就可以安全地提交。
