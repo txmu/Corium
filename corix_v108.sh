@@ -36814,12 +36814,13 @@ _blockchain_reorganize_to() (
     declare -A _REORG_TX_VALIDATION_CACHE
 
     [[ "$new_tip_hash" =~ ^[a-f0-9]{64}$ ]] || return 1
+    # DHT routing/cache state is independent of canonical ledger rollback.
     local original_tip original_weight reorg_committed=false reorg_original_fs="$CURRENT_TRANSACTION_BACKUP_PATH"
     original_tip=$(blockchain_get_latest_hash) || return 1
     [ "$new_tip_hash" != "$original_tip" ] || return 0
     original_weight=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT total_weight FROM blocks WHERE hash=%s;" "$original_tip") || return 1
-    db_begin_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB" || return 1
-    trap 'status=$?; if ! $reorg_committed; then if [ -z "$reorg_original_fs" ]; then _rollback_filesystem_transaction || status=1; fi; db_rollback_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB"; fi; release_lock "system"; release_lock "network"; exit "$status"' EXIT
+    db_begin_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" || return 1
+    trap 'status=$?; if ! $reorg_committed; then if [ -z "$reorg_original_fs" ]; then _rollback_filesystem_transaction || status=1; fi; db_rollback_transaction "$BLOCKCHAIN_DB" "$FORUM_DB"; fi; release_lock "system"; release_lock "network"; exit "$status"' EXIT
     trap 'exit 143' TERM
     trap 'exit 130' INT
 
@@ -36972,7 +36973,7 @@ _blockchain_reorganize_to() (
     [ "$expected_parent" = "$new_tip_hash" ] && [ "$parent_total_weight" -gt "$original_weight" ] || return 1
     db_execute_safe "$BLOCKCHAIN_DB" "INSERT OR REPLACE INTO chain_state (key, value) VALUES ('chain_info', %s);" "$new_tip_hash|$parent_height" || return 1
     if [ -z "$reorg_original_fs" ] && [ -n "$CURRENT_TRANSACTION_BACKUP_PATH" ]; then _commit_transaction || return 1; fi
-    db_commit_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB" || return 1
+    db_commit_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" || return 1
     reorg_committed=true
 
     msg "[REORG] 链重组完成！新的链顶是 ${new_tip_hash:0:16}... (Chain reorganization complete! New tip is ${new_tip_hash:0:16}...)"
@@ -39888,8 +39889,8 @@ blockchain_mine_block() (
     set -e
     acquire_lock "system" || return 1
     local mining_committed=false mining_original_fs="$CURRENT_TRANSACTION_BACKUP_PATH"
-    db_begin_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB" || return 1
-    trap 'status=$?; if ! $mining_committed; then if [ -z "$mining_original_fs" ]; then _rollback_filesystem_transaction || status=1; fi; db_rollback_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB"; fi; release_lock "system"; exit "$status"' EXIT
+    db_begin_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" || return 1
+    trap 'status=$?; if ! $mining_committed; then if [ -z "$mining_original_fs" ]; then _rollback_filesystem_transaction || status=1; fi; db_rollback_transaction "$BLOCKCHAIN_DB" "$FORUM_DB"; fi; release_lock "system"; exit "$status"' EXIT
     info "尝试创建并广播新区块... (Attempting to create and broadcast a new block...)"
     
     # 1. 检查是否有待处理的交易 (Check if there are any pending transactions)
@@ -40047,7 +40048,7 @@ blockchain_mine_block() (
     db_execute_safe "$BLOCKCHAIN_DB" "INSERT OR REPLACE INTO chain_state VALUES ('chain_info',%s);" "$block_hash|$height" || return 1
     _ziokt_zkn_after_pack "$block_hash" || return 1
     if [ -z "$mining_original_fs" ] && [ -n "$CURRENT_TRANSACTION_BACKUP_PATH" ]; then _commit_transaction || return 1; fi
-    db_commit_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" "$DHT_DB" || return 1
+    db_commit_transaction "$BLOCKCHAIN_DB" "$FORUM_DB" || return 1
     mining_committed=true
     # Peers may synchronously announce their next block while we broadcast.
     # The canonical transaction is committed; do not hold its writer lock
@@ -40126,6 +40127,9 @@ blockchain_verify_package() {
 # Creates, signs, and stores a new transaction, then shares its hash on the P2P network.
 # 创建、签名并存储一个新交易，然后将其哈希共享到 P2P 网络。
 blockchain_create_transaction() {
+    # Transaction admission must not race a canonical snapshot rollback.
+    acquire_lock "system" || return 1
+    trap 'release_lock "system"' RETURN
     local tx_type="$1"
     local tx_data="$2"
 

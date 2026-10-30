@@ -214,13 +214,17 @@ class ReorgTests(Fixture):
                     with sqlite3.connect(self.chain) as db:
                         row=db.execute('SELECT timestamp FROM blocks WHERE height=1').fetchone()
                     if row and row[0]==101:
-                        observed=True;os.killpg(proc.pid,signal.SIGTERM);break
+                        observed=True
+                        self.run_core('dht_add_node '+('c'*64)+' ipv4 127.0.0.1 19091')
+                        os.killpg(proc.pid,signal.SIGTERM);break
                     time.sleep(0.025)
                 self.assertTrue(observed,'Did not reach partial alternate apply: '+output.read_text())
                 self.assertNotEqual(proc.wait(timeout=30),0)
             finally:
                 if proc.poll() is None:os.killpg(proc.pid,signal.SIGKILL);proc.wait()
         self.assertEqual(self.semantic(),before,'Interrupted reorg changed semantic state: '+output.read_text())
+        with sqlite3.connect(self.dht) as db:
+            self.assertIsNotNone(db.execute('SELECT 1 FROM nodes WHERE id=?',('c'*64,)).fetchone(),'Consensus rollback rewound independent live routing metadata')
         self.reorganize(tip);self.assert_replay();self.snapshot('after-interrupt.json',8)
 
 if __name__=='__main__':unittest.main(verbosity=2)

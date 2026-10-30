@@ -22,3 +22,12 @@ class ReplayTipCacheTests(Fixture):
  def test_pow_poll_configuration_is_bounded(self):
   for value in ['0','4','301','-1','5.5','invalid']:
    self.run_core('CORIUM_MINER_POLL_SECONDS='+value+' _consensus_daemon_loop',False)
+ def test_transaction_admission_respects_the_canonical_writer_lock(self):
+  import fcntl
+  path=self.run_core('printf "%s" "$SYSTEM_LOCK_FILE"').stdout
+  with open(path,'a') as holder:
+   fcntl.flock(holder,fcntl.LOCK_EX|fcntl.LOCK_NB)
+   self.run_core("blockchain_create_transaction set_nickname '{\"nickname\":\"writer-locked\"}'",False)
+  with sqlite3.connect(self.chain) as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM transactions').fetchone()[0],0)
+  self.run_core("blockchain_create_transaction set_nickname '{\"nickname\":\"writer-unlocked\"}'")
+  with sqlite3.connect(self.chain) as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM transactions').fetchone()[0],1)

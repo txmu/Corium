@@ -36,3 +36,11 @@ node-local PoW candidate scheduling. Legacy polling remains five seconds.
 Remove the environment override to roll back scheduling without touching ledger
 or consensus policy. A slower poll reduces low-difficulty empty-block races; it
 is not a block-validity rule or a guarantee against normal PoW forks.
+
+Mining and reorganization snapshots cover ledger/application state, not the
+independent global DHT routing/cache database. Otherwise a rejected branch could
+resurrect obsolete peer identities learned before a valid routing repair.
+Transaction creation shares the canonical writer lock, so a rollback cannot
+silently erase concurrent admission. Cached orphan objects may remain; they are
+not confirmations and native signatures/work still decide admission. An actual
+interrupted native TLS reorg test checks that a newer routing row survives.
