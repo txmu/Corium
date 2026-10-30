@@ -26,3 +26,8 @@ class ActivationReorgTests(NativeWorkConsensusUnits,ReorgTests):
   with sqlite3.connect(self.chain) as db:
    db.row_factory=sqlite3.Row
    self.assertTrue(work.verify(db,self.network_id,work.stored(db,candidate['hash']),candidate['hash'])['work_verified'])
+
+def load_tests(loader,standard_tests,pattern):
+ """Run the new boundary case; fixture-base cases run in their own modules."""
+ import unittest
+ return unittest.TestSuite([ActivationReorgTests('test_activation_boundary_fast_forward')])
