@@ -34,6 +34,16 @@ class DNAReplayAnchorTests(Fixture):
             self.assertEqual(db.execute("SELECT value FROM chain_state WHERE key='last_processed_height'").fetchone()[0],'786')
             self.assertEqual(db.execute('SELECT count(*) FROM block_work').fetchone()[0],2)
 
+    def test_empty_batch_matches_serial_replay_and_rejects_bad_signature(self):
+        batched=self.root/'batch';serial=self.root/'serial';batched.mkdir();serial.mkdir()
+        self.run_core('_internal_replay_chain_state 786 "'+str(batched)+'"; CORIUM_REPLAY_BATCH_DISABLE=1 _internal_replay_chain_state 786 "'+str(serial)+'"')
+        left=self.run_core('BLOCKCHAIN_DB="'+str(batched/'chain.db')+'"; FORUM_DB="'+str(batched/'forum.db')+'"; _internal_semantic_state').stdout
+        right=self.run_core('BLOCKCHAIN_DB="'+str(serial/'chain.db')+'"; FORUM_DB="'+str(serial/'forum.db')+'"; _internal_semantic_state').stdout
+        self.assertEqual(json.loads(left.splitlines()[-1]),json.loads(right.splitlines()[-1]))
+        with sqlite3.connect(self.chain) as db:db.execute("UPDATE blocks SET signature='00' WHERE height=786")
+        rejected=self.root/'invalid';rejected.mkdir()
+        self.run_core('_internal_replay_chain_state 786 "'+str(rejected)+'"',False)
+
     def test_changed_baseline_and_wrong_authority_are_rejected(self):
         original=self.baseline.read_bytes();state=json.loads(original);state['chain']['validators'][0]['stake']+=1
         self.baseline.write_bytes(DNA.encoded(state));replay=self.root/'rejected';replay.mkdir()
