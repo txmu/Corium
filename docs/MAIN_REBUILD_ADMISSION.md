@@ -30,3 +30,9 @@ snapshots cannot restore over a concurrent native commit. Mining releases that
 lock after commit and before peer broadcasts. Canonical parent reads query the
 block table rather than trusting the derived `chain_info` cache. Targeted native
 regressions cover a poisoned cache and a real held-writer-lock reorganization.
+
+The optional `CORIUM_MINER_POLL_SECONDS` (5–300, default 5) only controls
+node-local PoW candidate scheduling. Legacy polling remains five seconds.
+Remove the environment override to roll back scheduling without touching ledger
+or consensus policy. A slower poll reduces low-difficulty empty-block races; it
+is not a block-validity rule or a guarantee against normal PoW forks.

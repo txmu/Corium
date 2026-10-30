@@ -19,3 +19,6 @@ class ReplayTipCacheTests(Fixture):
   self.run_core('blockchain_create_transaction set_nickname \'{"nickname":"canonical-tip-next"}\'; blockchain_mine_block')
   with sqlite3.connect(self.chain) as db:
    self.assertEqual(db.execute('SELECT previous_hash FROM blocks WHERE height=2').fetchone()[0],expected)
+ def test_pow_poll_configuration_is_bounded(self):
+  for value in ['0','4','301','-1','5.5','invalid']:
+   self.run_core('CORIUM_MINER_POLL_SECONDS='+value+' _consensus_daemon_loop',False)

@@ -33409,12 +33409,16 @@ dht_send_message() {
 _consensus_daemon_loop() {
     info "[CONSENSUS-DAEMON] 共识守护进程已启动。正在进入主循环... / Consensus Daemon started. Entering main loop..."
     
+    # Node-local PoW scheduling only; accepted block rules and Legacy timing
+    # are unchanged. A bounded slower poll avoids needless empty-block races.
+    local mining_poll_seconds="${CORIUM_MINER_POLL_SECONDS:-5}" loop_delay=5
+    [[ "$mining_poll_seconds" =~ ^[0-9]{1,3}$ ]] && [ "$mining_poll_seconds" -ge 5 ] && [ "$mining_poll_seconds" -le 300 ] || return 1
     # 无限循环，确保共识始终在推进
     # Infinite loop to ensure consensus is always advancing
     while true; do
         # 0. 短暂休眠，避免 CPU 占用过高
         # 0. Sleep briefly to avoid high CPU usage
-        sleep 5
+        sleep "$loop_delay"
         
         # 1. 检查节点身份公钥
         # 1. Check node identity public key
@@ -33432,6 +33436,9 @@ _consensus_daemon_loop() {
         if type _corium_work_consensus >/dev/null 2>&1; then
             daemon_work_mode=$(_corium_work_consensus mode "$BLOCKCHAIN_DB" "$CORIUM_NETWORK_ID" "$candidate_height" 2>/dev/null | jq -er .mode 2>/dev/null || echo "pos")
         fi
+
+        loop_delay=5
+        [ "$daemon_work_mode" != pow-v2 ] || loop_delay="$mining_poll_seconds"
 
         # 检查本地挖矿开关与交易池：防止无交易时持续产生空块
         if [ "${CORIUM_MINING_ENABLED:-1}" = "0" ] || [ -f "$CORIUM_ROOT/pause_mining" ]; then
