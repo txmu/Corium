@@ -36814,6 +36814,7 @@ dht_bootstrap() {
             local node_id bootstrap_id response peer_id temporary_node=0
             bootstrap_id=$(_internal_hash_text "$resolved_node_str")
             node_id=$(db_query_safe "$DHT_DB" "SELECT id FROM nodes WHERE address = %s AND port = %d LIMIT 1;" "$res_addr" "$res_port")
+            [ "$node_id" != "$bootstrap_id" ] || temporary_node=1
             if [ -z "$node_id" ]; then
                 node_id="$bootstrap_id"; temporary_node=1
                 dht_add_node "$node_id" "$res_type" "$res_addr" "$res_port" || continue

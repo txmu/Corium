@@ -22,4 +22,5 @@ DHT_BOOTSTRAP_NODES_STRING=ipv4:127.0.0.1:19999
         self.assertEqual(rows,[(peer,'127.0.0.1',19999)])
     def test_failed_new_seed_and_self_seed_leave_no_phantom_routes(self):
         self.assertEqual(self.bootstrap('','return 1'),[])
+        self.assertEqual(self.bootstrap('alias=$(_internal_hash_text "ipv4:127.0.0.1:19999"); dht_add_node "$alias" ipv4 127.0.0.1 19999','return 1'),[])
         self.assertEqual(self.bootstrap('',"printf 'PONG:"+self.identity+"'"),[])
