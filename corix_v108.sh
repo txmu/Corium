@@ -56062,20 +56062,26 @@ _internal_rebuild_derived_state() {
     CORIUM_TEMP_ITEMS+=("$replay_dir")
     _internal_replay_chain_state "$height" "$replay_dir" || return 1
     ( BLOCKCHAIN_DB="$replay_dir/chain.db"; FORUM_DB="$replay_dir/forum.db"; _internal_semantic_state ) > "$replay_dir/state.json" || return 1
-    "${PYTHON_CMD}" - "$replay_dir/state.json" "$BLOCKCHAIN_DB" "$FORUM_DB" "$height" <<'PY_REBUILD'
+    "${PYTHON_CMD}" - "$replay_dir/state.json" "$BLOCKCHAIN_DB" "$FORUM_DB" "$height" "$replay_dir/chain.db" "$replay_dir/forum.db" <<'PY_REBUILD'
 import sqlite3,json,sys
 state=json.load(open(sys.argv[1])); db=sqlite3.connect(sys.argv[2]); db.execute('ATTACH DATABASE ? AS app',(sys.argv[3],))
 def decoded(value):
     return bytes.fromhex(value['$corium_blob']) if isinstance(value,dict) and set(value)=={'$corium_blob'} else value
 try:
     db.execute('BEGIN IMMEDIATE')
-    for label,tables in (('main',state['chain']),('app',state['application'])):
+    for label,tables,verified_path in (('main',state['chain'],sys.argv[5]),('app',state['application'],sys.argv[6])):
         schemas=state.get('_custom_schemas',{}).get('chain' if label=='main' else 'application',{})
         for table,sql in schemas.items():
             existing=db.execute("SELECT sql FROM "+label+".sqlite_master WHERE type='table' AND name=?",(table,)).fetchone()
             if not existing: db.execute(sql if label=='main' else sql.replace('CREATE TABLE ', 'CREATE TABLE app.',1))
         for table,rows in tables.items():
             if table in ('blocks','transactions'): continue
+            if not db.execute("SELECT 1 FROM "+label+".sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
+                # Upgrade older installed databases from the freshly replayed
+                # native schema, including lazy asset/compute tables.
+                with sqlite3.connect(verified_path) as verified:
+                    sql=verified.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone()[0]
+                db.execute(sql if label=='main' else sql.replace('CREATE TABLE ', 'CREATE TABLE app.',1))
             db.execute('DELETE FROM '+label+'."'+table+'"')
             for row in rows:
                 fields=list(row)

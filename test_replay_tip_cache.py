@@ -3,6 +3,17 @@ import sqlite3
 from test_core import Fixture
 
 class ReplayTipCacheTests(Fixture):
+ def test_rebuild_migrates_late_native_tables_in_an_older_database(self):
+  self.semantic()
+  with sqlite3.connect(self.chain) as db:
+   db.execute('DROP TABLE IF EXISTS cooperative_asset_nonces')
+   db.execute('DROP TABLE IF EXISTS cooperative_note_controls')
+   db.execute('DROP TABLE IF EXISTS zkc_owners')
+  self.run_core('_internal_rebuild_derived_state')
+  with sqlite3.connect(self.chain) as db:
+   for table in ('cooperative_asset_nonces','cooperative_note_controls','zkc_owners'):
+    self.assertIsNotNone(db.execute("SELECT 1 FROM sqlite_master WHERE name=?",(table,)).fetchone())
+   self.assertEqual(db.execute("SELECT value FROM chain_state WHERE key='last_processed_height'").fetchone(),('0',))
  def test_replayed_tip_matches_verified_block(self):
   self.run_core('blockchain_create_transaction set_nickname \'{"nickname":"replay-tip-regression"}\'; blockchain_mine_block')
   expected=sqlite3.connect(self.chain).execute('SELECT hash FROM blocks WHERE height=1').fetchone()[0]
