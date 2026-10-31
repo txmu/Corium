@@ -15,7 +15,11 @@ class VerifiedSnapshotTests(Fixture):
             self.assertEqual(result.returncode==0,ok,result.stdout+result.stderr)
         run(True)
         with sqlite3.connect(self.chain) as db:self.assertEqual(db.execute('SELECT MAX(height) FROM blocks').fetchone()[0],2)
+        with sqlite3.connect(self.chain) as db:
+            self.assertEqual(db.execute("SELECT value FROM chain_state WHERE key='last_processed_height'").fetchone()[0],'2')
         before=self.semantic()
+        self.run_core('_update_chain_state_cache')
+        self.assertEqual(self.semantic(),before)
         with sqlite3.connect(snapshot) as db:db.execute("UPDATE blocks SET signature='00' WHERE height=2")
         run(False);self.assertEqual(self.semantic(),before)
         self.assertEqual((self.etc/'identity.key').read_bytes(),key)

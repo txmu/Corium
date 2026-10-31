@@ -31919,6 +31919,16 @@ _parse_full_address() {
 # Discovers and returns all available public network identities for the local machine.
 # @output 格式: "type1:address1|type2:address2|..." e.g., "ipv4:1.2.3.4|ipv6:2001::1"
 # @output Format: "type1:address1|type2:address2|..." e.g., "ipv4:1.2.3.4|ipv6:2001::1"
+# Address and public TLS certificate are signed by the node's stable identity.
+_corium_address_claim() {
+    "${PYTHON_CMD:-python3}" - "$P2P_PORT" "$TLS_CERT_FILE" <<'PY_CORIUM_ADDRESS_CLAIM'
+import json,pathlib,sys,time
+path=pathlib.Path(sys.argv[2])
+if path.is_symlink() or not path.is_file() or path.stat().st_size>8192:raise ValueError('public certificate budget')
+print(json.dumps({'port':int(sys.argv[1]),'timestamp':int(time.time()),'certificate':path.read_text()},separators=(',',':')))
+PY_CORIUM_ADDRESS_CLAIM
+}
+
 # Public address changes never rotate the node signing or transport keys.
 _corium_public_address() {
     "${PYTHON_CMD:-python3}" - "$P2P_DIR" "${CORIUM_CONFIG_CACHE[p2p_public_address_mode]:-auto}" "${CORIUM_CONFIG_CACHE[p2p_public_ip]:-}" <<'PY_CORIUM_PUBLIC_ADDRESS'
@@ -35245,7 +35255,7 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
             try:
                 import ipaddress
                 claim=json.loads(payload)
-                if set(claim)!={'port','timestamp'} or type(claim['port']) is not int or not 1<=claim['port']<=65535 or type(claim['timestamp']) is not int or abs(time.time()-claim['timestamp'])>120:
+                if set(claim) not in ({'port','timestamp'},{'port','timestamp','certificate'}) or type(claim['port']) is not int or not 1<=claim['port']<=65535 or type(claim['timestamp']) is not int or abs(time.time()-claim['timestamp'])>120:
                     raise ValueError('address claim')
                 observed=ipaddress.ip_address(self.client_address[0])
                 if not observed.is_global:raise ValueError('public source required')
@@ -35253,20 +35263,40 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                 previous=db_query_ro(DHT_DB_PATH,'SELECT address,port,last_seen FROM nodes WHERE id=?',(sender_id,),fetch_one=True)
                 if previous and (claim['timestamp']<previous[2] or (claim['timestamp']==previous[2] and (str(observed),claim['port'])!=(previous[0],previous[1]))):
                     return {"status":"error","message":"Stale address update"}
-                # Carry the already pinned transport certificate across an
-                # authenticated identity's address change, preserving TOFU pins.
-                if previous and PEER_CERT_CACHE:
+                # The already verified identity signature binds the transport
+                # certificate, so a new independent node needs no TOFU approval.
+                if PEER_CERT_CACHE:
                     from pathlib import Path
-                    old=Path(PEER_CERT_CACHE)/(str(previous[0]).replace(':','_')+'_'+str(previous[1])+'.pem')
-                    new=Path(PEER_CERT_CACHE)/(str(observed).replace(':','_')+'_'+str(claim['port'])+'.pem')
-                    if old.is_file() and old!=new:
-                        pin=old.read_bytes()
-                        if len(pin)>65536:raise ValueError('certificate budget')
+                    from cryptography import x509
+                    from cryptography.hazmat.primitives import serialization as certificate_serialization
+                    import datetime,tempfile
+                    cache=Path(PEER_CERT_CACHE);cache.mkdir(parents=True,exist_ok=True)
+                    new=cache/(str(observed).replace(':','_')+'_'+str(claim['port'])+'.pem')
+                    pin=None
+                    if 'certificate' in claim:
+                        certificate=claim['certificate']
+                        if type(certificate)is not str or not 1<=len(certificate)<=8192:raise ValueError('certificate budget')
+                        parsed=x509.load_pem_x509_certificate(certificate.encode('ascii'))
+                        if parsed.public_bytes(certificate_serialization.Encoding.PEM).decode('ascii')!=certificate:raise ValueError('one canonical certificate required')
+                        now=datetime.datetime.now(datetime.timezone.utc)
+                        if not parsed.not_valid_before_utc<=now<=parsed.not_valid_after_utc:raise ValueError('certificate validity')
+                        pin=certificate.encode('ascii')
                         if new.exists() and new.read_bytes()!=pin:
-                            return {"status":"error","message":"Address certificate pin conflict"}
-                        if not new.exists():
-                            fd=os.open(new,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-                            with os.fdopen(fd,'wb') as target:target.write(pin)
+                            if not previous or claim['timestamp']<=previous[2]:raise ValueError('certificate identity conflict')
+                            owners=db_query_ro(DHT_DB_PATH,'SELECT id FROM nodes WHERE address=? AND port=? AND id!=?',(str(observed),claim['port'],sender_id),fetch_one=True)
+                            if owners:raise ValueError('another identity owns endpoint pin')
+                    elif previous:
+                        old=cache/(str(previous[0]).replace(':','_')+'_'+str(previous[1])+'.pem')
+                        if old.is_file():pin=old.read_bytes()
+                        if pin and new.exists() and new.read_bytes()!=pin:raise ValueError('address certificate pin conflict')
+                    if pin is not None and (not new.exists() or new.read_bytes()!=pin):
+                        if len(pin)>8192:raise ValueError('certificate budget')
+                        fd,temporary=tempfile.mkstemp(prefix='.identity-pin-',dir=cache)
+                        try:
+                            with os.fdopen(fd,'wb') as target:target.write(pin);target.flush();os.fsync(target.fileno())
+                            os.replace(temporary,new)
+                        finally:
+                            if os.path.exists(temporary):os.unlink(temporary)
                 query="""INSERT INTO nodes(id,address_type,address,port,capabilities,last_seen,distance)
                     VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
                     address_type=excluded.address_type,address=excluded.address,port=excluded.port,last_seen=excluded.last_seen WHERE excluded.last_seen>=nodes.last_seen"""
@@ -40595,6 +40625,8 @@ _blockchain_broadcast_new_block() {
     
     info "正在向对等节点广播已签名的新区块宣告... (Broadcasting signed new block announcement to peers...)"
     local address node_id total=0 success=0 timeouts=0 rejections=0 failures=0
+    local address_claim
+    address_claim=$(_corium_address_claim) || return 1
     while IFS= read -r address; do
         [ -n "$address" ] || continue
         _parse_full_address "$address" || continue
@@ -40602,6 +40634,7 @@ _blockchain_broadcast_new_block() {
         [ -n "$node_id" ] || continue
         total=$((total + 1))
         local send_rc=0
+        dht_send_message "$node_id" ANNOUNCE_ADDRESS "$address_claim" >/dev/null 2>&1 || true
         dht_send_message "$node_id" "ANNOUNCE_BLOCK" \
             "${block_hash}|${height}|$(get_our_ip)|${P2P_PORT}|${our_node_id}|${signature}" || send_rc=$?
         case "$send_rc" in

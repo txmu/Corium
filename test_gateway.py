@@ -292,3 +292,23 @@ class AddressMobilityTests(GatewayTests):
         self.assertEqual(self.rpc('ANNOUNCE_ADDRESS',{'port':7234,'timestamp':int(time.time())})['status'],'error')
         with sqlite3.connect(self.dht) as db:
             self.assertEqual(db.execute('SELECT address,port FROM nodes WHERE id=?',(self.identity,)).fetchone(),('8.8.8.8',7235))
+
+class PublicNodeJoinTests(GatewayTests):
+    def test_new_unstaked_identity_pins_its_signed_transport_certificate(self):
+        import datetime
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        peer=ec.generate_private_key(ec.SECP256K1())
+        public=peer.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode().rstrip('\n')
+        identity=hashlib.sha256(public.encode()).hexdigest();transport=ec.generate_private_key(ec.SECP256R1())
+        now=datetime.datetime.now(datetime.timezone.utc);name=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,'Independent node')])
+        certificate=x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(transport.public_key()).serial_number(x509.random_serial_number()).not_valid_before(now-datetime.timedelta(minutes=1)).not_valid_after(now+datetime.timedelta(days=1)).sign(transport,hashes.SHA256()).public_bytes(serialization.Encoding.PEM).decode()
+        cache=self.root/'peer-pins';self.ns['PEER_CERT_CACHE']=str(cache);self.handler.client_address=('13.112.54.178',49000)
+        payload=json.dumps({'port':17234,'timestamp':int(time.time()),'certificate':certificate})
+        envelope={'type':'ANNOUNCE_ADDRESS','payload':payload,'sender_id':identity,'public_key':public,'signature':peer.sign(('ANNOUNCE_ADDRESS|'+payload).encode(),ec.ECDSA(hashes.SHA256())).hex()}
+        self.assertEqual(self.handler.handle_dht_message(envelope).get('data'),'ADDRESS_UPDATED')
+        self.assertEqual((cache/'13.112.54.178_17234.pem').read_text(),certificate)
+        with sqlite3.connect(self.chain) as db:self.assertIsNone(db.execute('SELECT 1 FROM validators WHERE public_key_hash=?',(identity,)).fetchone())
+        envelope['payload']=payload.replace('17234','17235')
+        self.assertEqual(self.handler.handle_dht_message(envelope)['status'],'error')
+        self.assertFalse((cache/'13.112.54.178_17235.pem').exists())
