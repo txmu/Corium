@@ -66,6 +66,13 @@ class NativeLocalP2PTests(unittest.TestCase):
                 result=self.core(founder,'_internal_sync_fetch_new_blocks_to_stage "$CORIUM_ROOT/stage.db" 0',ok=False)
                 self.assertIn('synchronization is unverified',result.stderr)
                 for source in peers:
+                    # Ensure the local TLS cert exists so _corium_address_claim
+                    # does not fail with 'public certificate budget'.
+                    tls_dir=Path(source['root'])/'etc/corix/networks/default'
+                    tls_dir.mkdir(parents=True,exist_ok=True)
+                    tls_cert=tls_dir/'tls.crt'
+                    if not tls_cert.exists():
+                        tls_cert.write_bytes(Path(source['cert']).read_bytes())
                     for target in peers:
                         if source is target:
                             continue
