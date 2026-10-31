@@ -219,6 +219,15 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.rpc('STORE',digest+' '+self.identity,wrong)['status'],'error')
         with sqlite3.connect(self.dht) as db:self.assertEqual(json.loads(db.execute('SELECT nodes FROM chunks WHERE hash=?',(digest,)).fetchone()[0]),[self.identity])
 
+    def test_authenticated_provider_cache_is_independent_of_canonical_writer_lock(self):
+        import fcntl,shlex
+        result=subprocess.run(['bash','-c','source '+shlex.quote(str(SOURCE))+'; printf "%s" "$NETWORK_LOCK_FILE"'],capture_output=True,text=True,check=True)
+        lock=pathlib.Path(result.stdout);lock.parent.mkdir(parents=True,exist_ok=True)
+        with lock.open('a') as holder:
+            fcntl.flock(holder,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.assertEqual(self.rpc('STORE','e'*64+' '+self.identity)['status'],'success')
+        with sqlite3.connect(self.dht) as db:self.assertEqual(json.loads(db.execute('SELECT nodes FROM chunks').fetchone()[0]),[self.identity])
+
     def test_http_forum_query_write_is_rejected_before_execution(self):
         import http.client
         server=http.server.ThreadingHTTPServer(('127.0.0.1',0),self.ns['CoriumGatewayHandler'])

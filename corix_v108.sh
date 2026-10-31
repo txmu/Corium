@@ -34293,6 +34293,12 @@ def ipc_write_to_db(db_path, query, params=()):
     A dedicated IPC call for write operations.
     """
     try:
+        if db_path==DHT_DB_PATH and query.lstrip().startswith('INSERT INTO chunks('):
+            # Authenticated provider advertisements are a transport cache, not
+            # canonical chain state. Do not wait on a long consensus replay.
+            with db_lock,sqlite3.connect(db_path,timeout=2) as cache:
+                cache.execute(query,params)
+            return True
         # 调用一个新的内部命令来保证原子性
         # Call a new internal command for atomicity
         subprocess.run(
@@ -34300,7 +34306,7 @@ def ipc_write_to_db(db_path, query, params=()):
             check=True, timeout=10
         )
         return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,sqlite3.Error) as e:
         stderr = e.stderr.decode('utf-8').strip() if hasattr(e, 'stderr') and e.stderr else str(e)
         bilingual_print(f"IPC DB write failed for query '{query}': {stderr}", f"IPC 数据库写入失败: '{query}': {stderr}", "ERROR")
         return False
