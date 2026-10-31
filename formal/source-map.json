@@ -64,7 +64,7 @@
     "_internal_replay_chain_state": "93afcccc25852d3620ae7e52f38e47ddb1b0eaf61ae35782ce432cabf7399d15",
     "_blockchain_reorganize_to": "537fdfb2c4c74f4621ccb02b39e4dc62c3f1ef941fa9a1c95835d92ae05ca4f3",
     "blockchain_get_latest_hash": "18e78594ab0794f9f14704f9c7ee3184e01b03e747315f78973dae5cc3053baa",
-    "_consensus_daemon_loop": "cea0c8db528660fc329564f8eda55ff4a2354eec9712d4212682357d2093dbbd",
+    "_consensus_daemon_loop": "f55f948cb7571b7053e1dbdf58837bc5d3ef011e84ed0f34614d02002d9b37d2",
     "_validate_single_transaction": "aea2d1f980ed5033ecb0ba9a4f6f963a42b0663014af832ad1aa507f8c265b13",
     "blockchain_create_transaction": "7cfae1d292127f98c8fa6b12972296b4cb4e3eb4e1b2fa3a541ca19b83c42762",
     "blockchain_mine_block": "948db28987a35f9c789e9784bfc09f79a6340096256c9b84f7da18c32ce9af86",

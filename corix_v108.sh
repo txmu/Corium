@@ -33571,6 +33571,19 @@ _consensus_daemon_loop() {
             _corium_align_work_peers || { sleep 5; continue; }
             latest_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE(MAX(height),-1) FROM blocks;") || continue
             candidate_height=$((latest_height+1))
+            # Independent producers choose a parent/identity-specific quiet
+            # window and cancel it as soon as a peer advances the prefix.
+            # This schedules local work; it never changes accepted block rules.
+            local settle_tip settle_hash settle_delay settled=true
+            settle_tip=$(blockchain_get_latest_hash) || continue
+            settle_hash=$(_internal_hash_text "$(get_our_node_id)|$settle_tip") || continue
+            settle_delay=$((16#${settle_hash:0:4}%60))
+            while [ "$settle_delay" -gt 0 ]; do
+                sleep 1
+                if [ "$(blockchain_get_latest_hash)" != "$settle_tip" ]; then settled=false;break;fi
+                settle_delay=$((settle_delay-1))
+            done
+            $settled || continue
             # --- 开放式 PoW 模式：无需质押，无需管理员许可，任何合法矿工均可独立打包与计算工作证明 ---
             # --- Open PoW Mode: No stake or admin license required; any miner may package & compute PoW ---
             info "[CONSENSUS-DAEMON] [PoW] 满足出块条件，开始为区块 $candidate_height 构建候选区块并挖矿... / Mining candidate block $candidate_height..."
@@ -35325,11 +35338,12 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                 query="""INSERT INTO nodes(id,address_type,address,port,capabilities,last_seen,distance)
                     VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
                     address_type=excluded.address_type,address=excluded.address,port=excluded.port,last_seen=excluded.last_seen WHERE excluded.last_seen>=nodes.last_seen"""
-                with db_lock:
-                    if not ipc_write_to_db(DHT_DB_PATH,query,(sender_id,kind,str(observed),claim['port'],'{}',claim['timestamp'],str(int(sender_id,16)^int(my_id,16)))):
-                        return {"status":"error","message":"Address update persistence failed"}
+                # Routing is an independent peer cache, excluded from canonical
+                # rollback. A long branch replay must not block new peer admission.
+                with db_lock,sqlite3.connect(DHT_DB_PATH,timeout=2) as routes:
+                    routes.execute(query,(sender_id,kind,str(observed),claim['port'],'{}',claim['timestamp'],str(int(sender_id,16)^int(my_id,16))))
                 return {"status":"success","data":"ADDRESS_UPDATED"}
-            except (OSError,ValueError,TypeError,KeyError,AttributeError):
+            except (OSError,ValueError,TypeError,KeyError,AttributeError,sqlite3.Error):
                 return {"status":"error","message":"Invalid address update"}
 
         if msg_type == "PING":
