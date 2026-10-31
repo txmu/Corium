@@ -33495,6 +33495,28 @@ dht_send_message() {
 #
 # 此函数作为一个持久化的后台守护进程运行。它的职责是驱动区块链前进，
 # 方式是：当轮到自己时创建新区块，或者监听来自其他验证者的区块并处理超时（错过的区块）。
+# Ask authenticated peers for a fresher prefix before creating competing work.
+# Peer weight is only a discovery hint; the original native reorg validates all data.
+_corium_align_work_peers() {
+    local local_weight best_weight best_tip="" best_host="" best_port=""
+    local id host port state tip height weight address_claim=""
+    local_weight=$(db_query_static "$BLOCKCHAIN_DB" 'SELECT COALESCE(MAX(total_weight),0) FROM blocks;') || return 1
+    best_weight="$local_weight"
+    address_claim=$(_corium_address_claim 2>/dev/null) || address_claim=""
+    while IFS='|' read -r id host port; do
+        [[ "$id" =~ ^[a-f0-9]{64}$ && "$port" =~ ^[0-9]{1,5}$ ]] || continue
+        [ -z "$address_claim" ] || dht_send_message "$id" ANNOUNCE_ADDRESS "$address_claim" >/dev/null 2>&1 || true
+        state=$(dht_send_message "$id" GET_CHAIN_STATE "" 2>/dev/null) || continue
+        IFS='|' read -r tip height weight <<< "$state"
+        [[ "$tip" =~ ^[a-f0-9]{64}$ && "$height" =~ ^[0-9]{1,10}$ && "$weight" =~ ^[1-9][0-9]{0,17}$ ]] || continue
+        if [ "$weight" -gt "$best_weight" ]; then best_weight="$weight";best_tip="$tip";best_host="$host";best_port="$port";fi
+    done < <(db_query_static "$DHT_DB" 'SELECT id,address,port FROM nodes ORDER BY last_seen DESC LIMIT 3;')
+    if [ -n "$best_tip" ]; then
+        # A bad or unavailable peer cannot impose a global mining permission gate.
+        _blockchain_reorganize_to "$best_tip" "$best_host" "$best_port" || true
+    fi
+}
+
 _consensus_daemon_loop() {
     info "[CONSENSUS-DAEMON] 共识守护进程已启动。正在进入主循环... / Consensus Daemon started. Entering main loop..."
     
@@ -33546,6 +33568,9 @@ _consensus_daemon_loop() {
 
         # 分共识模式处理：
         if [ "$daemon_work_mode" = "pow-v2" ]; then
+            _corium_align_work_peers || { sleep 5; continue; }
+            latest_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE(MAX(height),-1) FROM blocks;") || continue
+            candidate_height=$((latest_height+1))
             # --- 开放式 PoW 模式：无需质押，无需管理员许可，任何合法矿工均可独立打包与计算工作证明 ---
             # --- Open PoW Mode: No stake or admin license required; any miner may package & compute PoW ---
             info "[CONSENSUS-DAEMON] [PoW] 满足出块条件，开始为区块 $candidate_height 构建候选区块并挖矿... / Mining candidate block $candidate_height..."

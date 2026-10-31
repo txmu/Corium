@@ -68,6 +68,13 @@ class ReorgTests(Fixture):
         current=self.semantic()
         result=self.run_core('replay=$(mktemp -d -p "$BUILD_TMP_DIR_BASE"); _internal_replay_chain_state "$(db_query_static "$BLOCKCHAIN_DB" "SELECT MAX(height) FROM blocks;")" "$replay"; BLOCKCHAIN_DB="$replay/chain.db"; FORUM_DB="$replay/forum.db"; _internal_semantic_state')
         self.assertEqual(current,json.loads(result.stdout.splitlines()[-1]))
+    def test_open_miner_aligns_with_authenticated_peer_before_competing(self):
+        self.branch(self.chain,1,10);self.run_core('_internal_rebuild_derived_state')
+        tip=self.branch(self.remote,3,30)
+        self.run_core('_corium_align_work_peers')
+        self.assertEqual(self.tip(self.chain),tip)
+        self.assert_replay()
+
     def test_missing_local_suffix_parent_recovers_from_verified_peer(self):
         self.branch(self.chain,3,10)
         self.run_core('_internal_rebuild_derived_state')
