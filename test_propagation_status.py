@@ -29,6 +29,13 @@ class PropagationStatusTests(unittest.TestCase):
     def setUp(self):
         self.fixture = Fixture()
         self.fixture.setUp()
+        now=datetime.datetime.now(datetime.timezone.utc)
+        subject=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,self.fixture.identity)])
+        cert=(x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+              .public_key(self.fixture.key.public_key()).serial_number(x509.random_serial_number())
+              .not_valid_before(now-datetime.timedelta(minutes=1)).not_valid_after(now+datetime.timedelta(days=1))
+              .sign(self.fixture.key,hashes.SHA256()))
+        (self.fixture.etc/'tls.crt').write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
     def tearDown(self):
         self.fixture.doCleanups()
