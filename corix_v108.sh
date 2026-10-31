@@ -36809,21 +36809,26 @@ dht_bootstrap() {
             local res_addr="${res_remainder%:*}"
             local res_port="${res_remainder##*:}"
             
-            # 为引导节点生成一个临时的、基于其完整地址的虚拟ID
-            # Generate a temporary, deterministic dummy ID for the bootstrap node based on its full address
-            local node_id
-            node_id=$(_internal_hash_text "$resolved_node_str")
-            
-            # 将节点添加到我们自己的路由表中
-            # Add the node to our own routing table
-            dht_add_node "$node_id" "$res_type" "$res_addr" "$res_port"
-            
-            # 通过向这个新添加的节点发送 PING 来尝试加入网络。
-            # dht_send_message 将会处理实际的通信、获取其真实 Node ID 并更新路由表。
-            # Attempt to join the network by PINGing this newly added peer.
-            # dht_send_message will handle the actual communication, get its real Node ID, and update the routing table.
+            # Preserve an established identity at this endpoint. Bootstrap IDs
+            # exist only until a pinned TLS PING returns the peer's real identity.
+            local node_id bootstrap_id response peer_id temporary_node=0
+            bootstrap_id=$(_internal_hash_text "$resolved_node_str")
+            node_id=$(db_query_safe "$DHT_DB" "SELECT id FROM nodes WHERE address = %s AND port = %d LIMIT 1;" "$res_addr" "$res_port")
+            if [ -z "$node_id" ]; then
+                node_id="$bootstrap_id"; temporary_node=1
+                dht_add_node "$node_id" "$res_type" "$res_addr" "$res_port" || continue
+            fi
             info "  -> 正在连接到 / Connecting to: ${res_type}://${res_addr}:${res_port}"
-            dht_send_message "$node_id" "PING" "" >/dev/null 2>&1 || warn "  -> 连接到 ${res_addr} 失败 (超时或无响应) / Connection to ${res_addr} failed (timeout or no response)"
+            if response=$(dht_send_message "$node_id" PING "") && [[ "$response" =~ ^PONG:([a-f0-9]{64})$ ]]; then
+                peer_id="${BASH_REMATCH[1]}"
+                if [ "$node_id" != "$peer_id" ] || [ "$peer_id" = "$(get_our_node_id)" ]; then
+                    db_execute_safe "$DHT_DB" "DELETE FROM nodes WHERE id=%s AND address=%s AND port=%d;" "$node_id" "$res_addr" "$res_port" || continue
+                fi
+                [ "$peer_id" = "$(get_our_node_id)" ] || dht_add_node "$peer_id" "$res_type" "$res_addr" "$res_port"
+            else
+                [ "$temporary_node" -eq 0 ] || db_execute_safe "$DHT_DB" "DELETE FROM nodes WHERE id=%s;" "$bootstrap_id"
+                warn "  -> 连接到 ${res_addr} 失败 (超时或无响应) / Connection to ${res_addr} failed (timeout or no response)"
+            fi
         done
     done
 }
