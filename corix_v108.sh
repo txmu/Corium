@@ -39644,7 +39644,17 @@ _validate_single_transaction() {
         fetched_tx_path=$(mktemp)
         CORIUM_TEMP_ITEMS+=("$fetched_tx_path")
 
-        if ! _p2p_download_object "$tx_hash" "$fetched_tx_path"; then
+        # The block's authenticated peer can supply its signed transaction
+        # directly. A transaction digest commits semantic signing bytes, not
+        # the JSON transport envelope used by generic file-chunk discovery.
+        local direct_tx="" fetched=false
+        if [ -n "$peer_ip" ] && [ -n "$peer_port" ]; then
+            direct_tx=$(dht_send_message "$peer_ip" "$peer_port" GET_TRANSACTION "$tx_hash" 2>/dev/null) || direct_tx=""
+            if [ "${#direct_tx}" -le 65536 ] && jq -e 'type=="object" and (keys|sort)==["data","public_key","signature","timestamp","type"] and (.type|type)=="string" and (.data|type)=="object" and (.public_key|type)=="string" and (.signature|type)=="string" and (.timestamp|type)=="number"' <<< "$direct_tx" >/dev/null 2>&1; then
+                printf '%s' "$direct_tx" > "$fetched_tx_path"; fetched=true
+            fi
+        fi
+        if ! $fetched && ! _p2p_download_object "$tx_hash" "$fetched_tx_path"; then
             warn "      ! 无法获取交易 '$tx_hash'。验证失败。 (! Could not fetch transaction '$tx_hash'. Validation failed.)"
             reorg_cache["$tx_hash"]="invalid"; return 1
         fi

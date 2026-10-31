@@ -75,6 +75,16 @@ class ReorgTests(Fixture):
         self.assertEqual(self.tip(self.chain),tip)
         self.assert_replay()
 
+    def test_reorg_fetches_and_verifies_missing_transaction_from_actual_peer_rpc(self):
+        tx=self.remote_nickname('RPC-only transaction | 中文🙂')
+        tip=self.branch(self.remote,2,20,txs={1:[tx]})
+        self.reorganize(tip);self.assertEqual(self.tip(self.chain),tip);self.assert_replay()
+        with sqlite3.connect(self.forum) as db:self.assertIsNotNone(db.execute('SELECT 1 FROM identity_cache WHERE nickname=?',('RPC-only transaction | 中文🙂',)).fetchone())
+        before=self.semantic();bad=self.remote_nickname('forged peer transaction')
+        with sqlite3.connect(self.remote) as db:db.execute('UPDATE transactions SET signature=? WHERE hash=?',('00',bad))
+        tip=self.branch(self.remote,3,30,txs={1:[tx],2:[bad]})
+        self.reorganize(tip,False);self.assertEqual(self.semantic(),before)
+
     def test_missing_local_suffix_parent_recovers_from_verified_peer(self):
         self.branch(self.chain,3,10)
         self.run_core('_internal_rebuild_derived_state')
