@@ -33525,14 +33525,17 @@ dht_send_message() {
 _corium_align_work_peers() {
     local local_weight best_weight best_tip="" best_host="" best_port=""
     local id host port state tip height weight address_claim=""
+    # Mining alignment reads established routes. Bound each direct probe instead
+    # of running a full discovery/hole-punch/relay search for an offline peer.
+    local P2P_MESSAGE_TIMEOUT="${CORIUM_WORK_PEER_TIMEOUT:-5}"
     _corium_prune_seed_placeholders || return 1
     local_weight=$(db_query_static "$BLOCKCHAIN_DB" 'SELECT COALESCE(MAX(total_weight),0) FROM blocks;') || return 1
     best_weight="$local_weight"
     address_claim=$(_corium_address_claim 2>/dev/null) || address_claim=""
     while IFS='|' read -r id host port; do
         [[ "$id" =~ ^[a-f0-9]{64}$ && "$port" =~ ^[0-9]{1,5}$ ]] || continue
-        [ -z "$address_claim" ] || dht_send_message "$id" ANNOUNCE_ADDRESS "$address_claim" >/dev/null 2>&1 || true
-        state=$(dht_send_message "$id" GET_CHAIN_STATE "" 2>/dev/null) || continue
+        [ -z "$address_claim" ] || _dht_send_message_direct "$id" ANNOUNCE_ADDRESS "$address_claim" >/dev/null 2>&1 || true
+        state=$(_dht_send_message_direct "$id" GET_CHAIN_STATE "" 2>/dev/null) || continue
         IFS='|' read -r tip height weight <<< "$state"
         [[ "$tip" =~ ^[a-f0-9]{64}$ && "$height" =~ ^[0-9]{1,10}$ && "$weight" =~ ^[1-9][0-9]{0,17}$ ]] || continue
         if [ "$weight" -gt "$best_weight" ]; then best_weight="$weight";best_tip="$tip";best_host="$host";best_port="$port";fi
