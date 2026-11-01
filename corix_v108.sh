@@ -35323,7 +35323,11 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                         parsed=x509.load_pem_x509_certificate(certificate.encode('ascii'))
                         if parsed.public_bytes(certificate_serialization.Encoding.PEM).decode('ascii')!=certificate:raise ValueError('one canonical certificate required')
                         now=datetime.datetime.now(datetime.timezone.utc)
-                        if not parsed.not_valid_before_utc<=now<=parsed.not_valid_after_utc:raise ValueError('certificate validity')
+                        starts=getattr(parsed,'not_valid_before_utc',None)
+                        ends=getattr(parsed,'not_valid_after_utc',None)
+                        if starts is None:starts=parsed.not_valid_before.replace(tzinfo=datetime.timezone.utc)
+                        if ends is None:ends=parsed.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+                        if not starts<=now<=ends:raise ValueError('certificate validity')
                         pin=certificate.encode('ascii')
                         if new.exists() and new.read_bytes()!=pin:
                             if not previous or claim['timestamp']<=previous[2]:raise ValueError('certificate identity conflict')
