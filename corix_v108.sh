@@ -32778,6 +32778,22 @@ get_our_node_id() {
 # --- [重构][V55.4] dht_add_node (支持多地址) ---
 # --- MODIFIED: The function no longer sets trust_tier directly ---
 # --- 已修改: 此函数不再直接设置 trust_tier ---
+_corium_prune_seed_placeholders() {
+    "${PYTHON_CMD:-python3}" - "$DHT_DB" <<'PY_SEED_ROUTES'
+import hashlib,json,sqlite3,sys,time
+with sqlite3.connect(sys.argv[1],timeout=3) as db:
+    retired=[]
+    for identity,kind,address,port,raw,seen in db.execute('SELECT id,address_type,address,port,capabilities,last_seen FROM nodes'):
+        forms={f'{kind}:{address}:{port}'}
+        if kind=='ipv6':forms.add(f'{kind}:[{address.strip("[]")}]:{port}')
+        if identity not in {hashlib.sha256(value.encode()).hexdigest() for value in forms}:continue
+        try:pending=json.loads(raw).get('bootstrap_pending') is True and seen>=time.time()-120
+        except (ValueError,TypeError,AttributeError):pending=False
+        if not pending:retired.append((identity,))
+    db.executemany('DELETE FROM nodes WHERE id=?',retired)
+PY_SEED_ROUTES
+}
+
 dht_add_node() {
     local node_id="$1" address_type="$2" address="$3" port="${4:-NULL}" capabilities="${5:-{\}}"
     [[ "$node_id" =~ ^[a-f0-9]{64}$ ]] || return 1
@@ -32787,6 +32803,14 @@ dht_add_node() {
     if [ "$port" != NULL ]; then
         [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$((10#$port))" -ge 1 ] && [ "$((10#$port))" -le 65535 ] || return 1
         port=$((10#$port))
+    fi
+    # Endpoint hashes are local bootstrap lookup handles, never peer identities.
+    if [ "${CORIUM_BOOTSTRAP_PENDING:-0}" != 1 ]; then
+        [ "$node_id" != "$(_internal_hash_text "$address_type:$address:$port")" ] || return 1
+        if [ "$address_type" = ipv6 ]; then
+            local unbracketed="${address#[}";unbracketed="${unbracketed%]}"
+            [ "$node_id" != "$(_internal_hash_text "ipv6:[$unbracketed]:$port")" ] || return 1
+        fi
     fi
     printf '%s' "$capabilities" | jq -e 'type == "object"' >/dev/null || return 1
     local timestamp=$(date +%s)
@@ -32826,6 +32850,7 @@ dht_find_closest_nodes() {
     [[ "$target_id" =~ ^[a-f0-9]{64}$ && "$k" =~ ^[0-9]{1,3}$ && "$alpha" =~ ^[0-9]{1,3}$ ]] || return 1
     k=$((10#$k)); alpha=$((10#$alpha))
     [ "$k" -ge 1 ] && [ "$k" -le 256 ] && [ "$alpha" -ge 1 ] && [ "$alpha" -le 64 ] || return 1
+    _corium_prune_seed_placeholders || return 1
     declare -A queried_nodes=() candidates=()
     local our_id
     our_id=$(get_our_node_id) || return 1
@@ -33500,6 +33525,7 @@ dht_send_message() {
 _corium_align_work_peers() {
     local local_weight best_weight best_tip="" best_host="" best_port=""
     local id host port state tip height weight address_claim=""
+    _corium_prune_seed_placeholders || return 1
     local_weight=$(db_query_static "$BLOCKCHAIN_DB" 'SELECT COALESCE(MAX(total_weight),0) FROM blocks;') || return 1
     best_weight="$local_weight"
     address_claim=$(_corium_address_claim 2>/dev/null) || address_claim=""
@@ -35420,7 +35446,12 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                 return {"status": "error", "message": "Invalid lookup target"}
             nodes_raw = db_query_ro(DHT_DB_PATH, "SELECT id, address_type, address, port FROM nodes ORDER BY last_seen DESC,id LIMIT 1024;", fetch_all=True)
             if nodes_raw is None: return {"status": "error", "message": "Routing database unavailable"}
-            nodes_raw = sorted((r for r in nodes_raw if re.fullmatch(r'[a-f0-9]{64}',r[0])),key=lambda r:(int(r[0],16)^int(payload,16),r[0],r[1],r[2]))[:10]
+            def real_identity(row):
+                if not re.fullmatch(r'[a-f0-9]{64}',row[0]):return False
+                forms={f'{row[1]}:{row[2]}:{row[3]}'}
+                if row[1]=='ipv6':forms.add(f'ipv6:[{row[2].strip("[]")}]:{row[3]}')
+                return row[0] not in {hashlib.sha256(value.encode()).hexdigest()for value in forms}
+            nodes_raw = sorted((r for r in nodes_raw if real_identity(r)),key=lambda r:(int(r[0],16)^int(payload,16),r[0],r[1],r[2]))[:10]
             nodes_list = [f"{r[0]}:{r[1]}:{r[2]}" + (f":{r[3]}" if r[3] else "") for r in nodes_raw]
             nodes_str = " ".join(nodes_list)
             
@@ -35429,7 +35460,7 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                 if local_info: return {"status": "success", "data": "FOUND_CHUNK"}
                 announced = db_query_ro(DHT_DB_PATH,"SELECT N.id,N.address_type,N.address,N.port FROM chunks C JOIN json_each(C.nodes) P JOIN nodes N ON N.id=P.value WHERE C.hash=? ORDER BY N.id LIMIT 10",(payload,),fetch_all=True)
                 if announced is None: return {"status":"error","message":"Provider database unavailable"}
-                hints = [f"{r[0]}:{r[1]}:{r[2]}"+(f":{r[3]}" if r[3] else "") for r in announced if re.fullmatch(r'[a-f0-9]{64}',r[0])]
+                hints = [f"{r[0]}:{r[1]}:{r[2]}"+(f":{r[3]}" if r[3] else "") for r in announced if real_identity(r)]
                 nodes_str = " ".join(list(dict.fromkeys(hints+nodes_list))[:10])
             
             return {"status": "success", "data": f"NODES:{nodes_str}"}
@@ -36859,7 +36890,7 @@ dht_bootstrap() {
             [ "$node_id" != "$bootstrap_id" ] || temporary_node=1
             if [ -z "$node_id" ]; then
                 node_id="$bootstrap_id"; temporary_node=1
-                dht_add_node "$node_id" "$res_type" "$res_addr" "$res_port" || continue
+                CORIUM_BOOTSTRAP_PENDING=1 dht_add_node "$node_id" "$res_type" "$res_addr" "$res_port" '{"bootstrap_pending":true}' || continue
             fi
             info "  -> 正在连接到 / Connecting to: ${res_type}://${res_addr}:${res_port}"
             if response=$(dht_send_message "$node_id" PING "") && [[ "$response" =~ ^PONG:([a-f0-9]{64})$ ]]; then

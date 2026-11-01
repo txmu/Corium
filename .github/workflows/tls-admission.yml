@@ -17,7 +17,7 @@ jobs:
           mkdir -p ci-logs
           bash -n corix_v108.sh
           python3 ci/static-checks.py
-          python3 -m unittest -v test_tls_admission test_gateway 2>&1 | tee ci-logs/tls-admission.log
+          python3 -m unittest -v test_tls_admission test_seed_routes test_native_p2p_local 2>&1 | tee ci-logs/tls-admission.log
           sha256sum corix_v108.sh > ci-logs/native-source.sha256
       - uses: actions/upload-artifact@v4
         if: always()
