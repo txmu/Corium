@@ -33265,7 +33265,8 @@ _dht_send_message_direct() {
         local target_host="$address"
         [[ "$target_host" != *:* ]] || target_host="[$target_host]"
         local target_port="$port"
-        local cmd_timeout="${P2P_MESSAGE_TIMEOUT:-5}"
+        local connect_timeout="${P2P_MESSAGE_TIMEOUT:-5}"
+        local cmd_timeout="$connect_timeout"
         if [ "$message_type" = ANNOUNCE_BLOCK ]; then
             cmd_timeout=610
         fi
@@ -33298,7 +33299,7 @@ _dht_send_message_direct() {
         if [ ! -f "$peer_cert_file" ]; then
             local temp_cert_file; temp_cert_file=$(mktemp); CORIUM_TEMP_ITEMS+=("$temp_cert_file")
 
-            if ! timeout 10s openssl s_client "${proxy_opts[@]}" -connect "$target_host:$target_port" -showcerts </dev/null 2>/dev/null | openssl x509 -outform PEM > "$temp_cert_file"; then
+            if ! timeout "${connect_timeout}s" openssl s_client "${proxy_opts[@]}" -connect "$target_host:$target_port" -showcerts </dev/null 2>/dev/null | openssl x509 -outform PEM > "$temp_cert_file"; then
                 warn "无法获取节点 $target_host:$target_port 的TLS证书。 / Failed to retrieve TLS certificate from peer $target_host:$target_port."
                 continue
             fi
@@ -33341,7 +33342,7 @@ _dht_send_message_direct() {
         # ==================================================================
         
         local -a final_curl_args=(
-            --silent --show-error --fail --max-time "$cmd_timeout"
+            --silent --show-error --fail --connect-timeout "$connect_timeout" --max-time "$cmd_timeout"
             --insecure --pinnedpubkey "sha256//$peer_pin"
             -X POST
             -H "Content-Type: application/json"
