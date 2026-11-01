@@ -44,7 +44,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
-          python -m unittest -v test_ci_integration 2>&1 | tee ci-logs/integration.log
+          python -m unittest -v test_ci_integration test_tls_admission 2>&1 | tee ci-logs/integration.log
       - name: Consensus target, local process survival and history coverage regressions
         if: ${{ !cancelled() }}
         run: |

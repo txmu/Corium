@@ -1,0 +1,26 @@
+name: Native TLS admission regression
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tls-admission:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Python cryptography
+        run: python3 -m pip install cryptography
+      - name: Check source and exercise native TLS workers
+        run: |
+          set -o pipefail
+          mkdir -p ci-logs
+          bash -n corix_v108.sh
+          python3 ci/static-checks.py
+          python3 -m unittest -v test_tls_admission test_gateway 2>&1 | tee ci-logs/tls-admission.log
+          sha256sum corix_v108.sh > ci-logs/native-source.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-tls-admission
+          path: ci-logs/

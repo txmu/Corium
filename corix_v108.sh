@@ -36588,7 +36588,7 @@ if __name__ == "__main__":
             bilingual_print("FATAL: TLS certificate or key not found. Please run 'corix init'.", "致命错误: TLS 证书或密钥未找到。请运行 'corix init'。", "FATAL")
             sys.exit(1)
 
-        def create_server(port, handler):
+        def create_server(port, handler, tls_context=None):
             """
             一个健壮的、网络协议无关的服务器创建函数。
             A robust, network-protocol-agnostic server creation function.
@@ -36608,7 +36608,47 @@ if __name__ == "__main__":
                     # 我们需要动态地设置 address_family
                     # We need to set the address_family dynamically
                     class ThreadedTCPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-                        pass
+                        daemon_threads = True
+                        block_on_close = False
+                        request_queue_size = 128
+
+                        def __init__(self, *args, **kwargs):
+                            self.worker_slots = threading.BoundedSemaphore(64)
+                            super().__init__(*args, **kwargs)
+
+                        def process_request(self, request, client_address):
+                            # Never wait for a TLS client in the accept loop, or
+                            # spawn unbounded workers for incomplete handshakes.
+                            if not self.worker_slots.acquire(blocking=False):
+                                self.shutdown_request(request)
+                                return
+                            try:
+                                super().process_request(request, client_address)
+                            except BaseException:
+                                self.worker_slots.release()
+                                raise
+
+                        def process_request_thread(self, request, client_address):
+                            try:
+                                request.settimeout(5)
+                                if tls_context is not None:
+                                    request = tls_context.wrap_socket(
+                                        request, server_side=True,
+                                        do_handshake_on_connect=False)
+                                    request.do_handshake()
+                                request.settimeout(60)
+                                self.finish_request(request, client_address)
+                            except (ssl.SSLError, OSError):
+                                # An incomplete handshake/disconnected client is
+                                # isolated to its own bounded worker.
+                                pass
+                            except Exception:
+                                self.handle_error(request, client_address)
+                            finally:
+                                try:
+                                    self.shutdown_request(request)
+                                finally:
+                                    self.worker_slots.release()
                     
                     ThreadedTCPServer.address_family = family
                     server = ThreadedTCPServer(sockaddr, handler)
@@ -36643,8 +36683,7 @@ if __name__ == "__main__":
         
         context.load_cert_chain(certfile=cert_file, keyfile=key_file)
         
-        httpd_dht = create_server(dht_api_port, CoriumGatewayHandler)
-        httpd_dht.socket = context.wrap_socket(httpd_dht.socket, server_side=True)
+        httpd_dht = create_server(dht_api_port, CoriumGatewayHandler, context)
         dht_thread = threading.Thread(target=httpd_dht.serve_forever, name="DHT-API-Thread", daemon=True)
         dht_thread.start()
         bilingual_print(f"Encrypted DHT API server started on all interfaces, port {dht_api_port}",
@@ -36653,8 +36692,7 @@ if __name__ == "__main__":
         # --- [V103 端口冲突修复] 额外启动一个线程来监听专用的文件服务端口 ---
         # --- [V103 Port Conflict Fix] Start an additional thread for the dedicated file service port ---
         file_server_port = P2P_PORT + P2P_FILE_PORT_OFFSET
-        httpd_file_server = create_server(file_server_port, CoriumGatewayHandler)
-        httpd_file_server.socket = context.wrap_socket(httpd_file_server.socket, server_side=True)
+        httpd_file_server = create_server(file_server_port, CoriumGatewayHandler, context)
         file_thread = threading.Thread(target=httpd_file_server.serve_forever, name="File-Server-Thread", daemon=True)
         file_thread.start()
         bilingual_print(f"Encrypted P2P File Server started on all interfaces, port {file_server_port}",
