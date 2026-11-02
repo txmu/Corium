@@ -33927,6 +33927,7 @@ EOF_DB_WRITE
 # --- 第6.2节: 统一P2P守护进程 (V56.4版 - 完全实现修正版)                             ---
 # =======================================================================================
 dht_server_daemon() {
+    ulimit -n 65536 2>/dev/null || true
     # --- [V103 端口冲突最终修复] ---
     # 使用 PID 文件作为锁，确保此守护进程在任何时候都只有一个实例在运行。
     if [ -f "$DAEMON_PID_FILE" ] && kill -0 "$(cat "$DAEMON_PID_FILE" 2>/dev/null)" 2>/dev/null; then
@@ -34014,6 +34015,16 @@ from threading import Lock
 import traceback
 import glob # 用于日志文件轮转 (For log file rotation)
 import signal
+from contextlib import closing
+import resource
+try:
+    _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    _target = 65536
+    _desired = min(_target, _hard) if _hard != resource.RLIM_INFINITY else _target
+    if _soft < _desired:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (_desired, _hard))
+except Exception:
+    pass
 # [新增] 导入用于反向代理的库
 # [NEW] Import libraries for reverse proxying
 import http.client
@@ -34326,7 +34337,7 @@ def ipc_write_to_db(db_path, query, params=()):
         if db_path==DHT_DB_PATH and query.lstrip().startswith('INSERT INTO chunks('):
             # Authenticated provider advertisements are a transport cache, not
             # canonical chain state. Do not wait on a long consensus replay.
-            with db_lock,sqlite3.connect(db_path,timeout=2) as cache:
+            with db_lock,closing(sqlite3.connect(db_path,timeout=2)) as cache,cache:
                 cache.execute(query,params)
             return True
         # 调用一个新的内部命令来保证原子性
@@ -35380,7 +35391,7 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                     address_type=excluded.address_type,address=excluded.address,port=excluded.port,last_seen=excluded.last_seen WHERE excluded.last_seen>=nodes.last_seen"""
                 # Routing is an independent peer cache, excluded from canonical
                 # rollback. A long branch replay must not block new peer admission.
-                with db_lock,sqlite3.connect(DHT_DB_PATH,timeout=2) as routes:
+                with db_lock,closing(sqlite3.connect(DHT_DB_PATH,timeout=2)) as routes,routes:
                     routes.execute(query,(sender_id,kind,str(observed),claim['port'],'{}',claim['timestamp'],str(int(sender_id,16)^int(my_id,16))))
                 return {"status":"success","data":"ADDRESS_UPDATED"}
             except (OSError,ValueError,TypeError,KeyError,AttributeError,sqlite3.Error):
@@ -35547,24 +35558,25 @@ class CoriumGatewayHandler(http.server.BaseHTTPRequestHandler):
                     # [MODIFICATION END]
 
                     conn = sqlite3.connect(f"file:{DHT_DB_PATH}?mode=rw", uri=True)
-                    cursor = conn.cursor()
-                    
-                    one_minute_ago = int(time.time()) - 60
-                    cursor.execute("DELETE FROM pouw_rate_limit_log WHERE requester_id = ? AND timestamp < ?", (sender_id, one_minute_ago))
-                    
-                    cursor.execute("SELECT COUNT(*) FROM pouw_rate_limit_log WHERE requester_id = ?", (sender_id,))
-                    request_count = cursor.fetchone()[0]
-                    
-                    # [MODIFICATION] 使用从数据库读取的变量进行比较
-                    # [MODIFICATION] Use the variable read from the database for comparison
-                    if request_count >= rate_limit:
+                    try:
+                        cursor = conn.cursor()
+                        
+                        one_minute_ago = int(time.time()) - 60
+                        cursor.execute("DELETE FROM pouw_rate_limit_log WHERE requester_id = ? AND timestamp < ?", (sender_id, one_minute_ago))
+                        
+                        cursor.execute("SELECT COUNT(*) FROM pouw_rate_limit_log WHERE requester_id = ?", (sender_id,))
+                        request_count = cursor.fetchone()[0]
+                        
+                        # [MODIFICATION] 使用从数据库读取的变量进行比较
+                        # [MODIFICATION] Use the variable read from the database for comparison
+                        if request_count >= rate_limit:
+                            bilingual_print(f"Rate limit exceeded for {sender_id[:12]}...", f"节点 {sender_id[:12]}... 的请求已超过速率限制。", "WARN")
+                            return {"status": "error", "message": "Rate limit exceeded."}
+                        
+                        cursor.execute("INSERT INTO pouw_rate_limit_log (requester_id, timestamp) VALUES (?, ?)", (sender_id, int(time.time())))
+                        conn.commit()
+                    finally:
                         conn.close()
-                        bilingual_print(f"Rate limit exceeded for {sender_id[:12]}...", f"节点 {sender_id[:12]}... 的请求已超过速率限制。", "WARN")
-                        return {"status": "error", "message": "Rate limit exceeded."}
-                    
-                    cursor.execute("INSERT INTO pouw_rate_limit_log (requester_id, timestamp) VALUES (?, ?)", (sender_id, int(time.time())))
-                    conn.commit()
-                    conn.close()
 
                 # ----------------------------------------------------------------------
                 # --- 2. 验证证明格式与签名 (Validate Proof Format & Signature) ---
