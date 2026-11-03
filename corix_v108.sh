@@ -33603,7 +33603,7 @@ _consensus_daemon_loop() {
             candidate_height=$((latest_height+1))
             # Share a parent-timestamp clock for open-work scheduling. Rank
             # discovered peers by the same per-parent hash and give each rank
-            # two minutes to publish and relay before the next rank begins work.
+            # four minutes to publish, validate, and relay before the next rank.
             # This schedules local work; accepted block rules are unchanged.
             local settle_tip settle_hash settle_delay settle_origin settle_until settled=true
             local peer_id peer_hash settle_rank=0 settle_ticks=0 our_id
@@ -33618,7 +33618,7 @@ _consensus_daemon_loop() {
                     settle_rank=$((settle_rank+1))
                 fi
             done < <(db_query_static "$DHT_DB" 'SELECT id FROM nodes ORDER BY last_seen DESC LIMIT 8;')
-            settle_delay=$((settle_rank*120+16#${settle_hash:0:4}%30))
+            settle_delay=$((settle_rank*240+16#${settle_hash:0:4}%30))
             settle_origin=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT timestamp FROM blocks WHERE hash=%s;" "$settle_tip") || continue
             [[ "$settle_origin" =~ ^[0-9]{1,12}$ ]] || continue
             settle_until=$((settle_origin+5+settle_delay))
