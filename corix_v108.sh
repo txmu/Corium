@@ -33621,6 +33621,12 @@ _consensus_daemon_loop() {
             settle_delay=$((settle_rank*240+16#${settle_hash:0:4}%30))
             settle_origin=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT timestamp FROM blocks WHERE hash=%s;" "$settle_tip") || continue
             [[ "$settle_origin" =~ ^[0-9]{1,12}$ ]] || continue
+            # A restored or long-idle chain may have passed every parent-based
+            # slot already. Re-anchor locally before applying the rank delay;
+            # the final peer alignment still checks for a newer valid tip.
+            if [ "$((settle_origin+240))" -lt "$(date +%s)" ]; then
+                settle_origin=$(date +%s)
+            fi
             settle_until=$((settle_origin+5+settle_delay))
             while [ "$(date +%s)" -lt "$settle_until" ]; do
                 sleep 1
