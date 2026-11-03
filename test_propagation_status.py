@@ -84,6 +84,7 @@ class PropagationStatusTests(unittest.TestCase):
         dummy_node = "1" * 64
         cmd = (
             f"dht_add_node {dummy_node} ipv4 127.0.0.1 1\n"
+            "wait\n"
             f"dht_announce_chunk {'a'*64}\n"
         )
         res = self.run_corium_bash(cmd)
@@ -107,6 +108,7 @@ exit 0
         dummy_node = "2" * 64
         cmd = (
             f"dht_add_node {dummy_node} ipv4 127.0.0.1 {port}\n"
+            "wait\n"
             f"dht_announce_chunk {'a'*64}\n"
         )
         res = self.run_corium_bash(cmd, extra_env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
@@ -129,6 +131,7 @@ exit 28
         dummy_node = "3" * 64
         cmd = (
             f"dht_add_node {dummy_node} ipv4 127.0.0.1 {port}\n"
+            "wait\n"
             f"dht_announce_chunk {'a'*64}\n"
         )
         res = self.run_corium_bash(cmd, extra_env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
@@ -162,6 +165,7 @@ exit 28
         cmd = (
             f"dht_add_node {node_success} ipv4 127.0.0.1 {port1}\n"
             f"dht_add_node {node_timeout} ipv4 127.0.0.1 {port2}\n"
+            "wait\n"
             f"dht_announce_chunk {'a'*64}\n"
         )
         res = self.run_corium_bash(cmd, extra_env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
@@ -186,6 +190,7 @@ exit 0
         node_success = "6" * 64
         cmd = (
             f"dht_add_node {node_success} ipv4 127.0.0.1 {port}\n"
+            "wait\n"
             f"dht_announce_chunk {'a'*64}\n"
             "genesis=$(db_query_safe \"$BLOCKCHAIN_DB\" 'SELECT hash FROM blocks WHERE height = 0;')\n"
             "_blockchain_broadcast_new_block \"$genesis\"\n"
