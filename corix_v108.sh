@@ -33606,7 +33606,7 @@ _consensus_daemon_loop() {
             # two minutes to publish and relay before the next rank begins work.
             # This schedules local work; accepted block rules are unchanged.
             local settle_tip settle_hash settle_delay settle_origin settle_until settled=true
-            local peer_id peer_hash settle_rank=0 our_id
+            local peer_id peer_hash settle_rank=0 settle_ticks=0 our_id
             settle_tip=$(blockchain_get_latest_hash) || continue
             our_id=$(get_our_node_id) || continue
             settle_hash=$(_internal_hash_text "$our_id|$settle_tip") || continue
@@ -33624,6 +33624,11 @@ _consensus_daemon_loop() {
             settle_until=$((settle_origin+5+settle_delay))
             while [ "$(date +%s)" -lt "$settle_until" ]; do
                 sleep 1
+                settle_ticks=$((settle_ticks+1))
+                if [ "$settle_ticks" -ge 15 ]; then
+                    settle_ticks=0
+                    _corium_align_work_peers || true
+                fi
                 if [ "$(blockchain_get_latest_hash)" != "$settle_tip" ]; then settled=false;break;fi
             done
             $settled || continue
