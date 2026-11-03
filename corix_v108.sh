@@ -33601,14 +33601,24 @@ _consensus_daemon_loop() {
             _corium_align_work_peers || { sleep 5; continue; }
             latest_height=$(db_query_static "$BLOCKCHAIN_DB" "SELECT COALESCE(MAX(height),-1) FROM blocks;") || continue
             candidate_height=$((latest_height+1))
-            # Share a parent-timestamp clock for open-work scheduling. A wider
-            # identity-specific window gives peers time to publish a valid
-            # block before another producer starts on the same parent.
+            # Share a parent-timestamp clock for open-work scheduling. Rank
+            # discovered peers by the same per-parent hash and give each rank
+            # a full minute to publish before the next rank begins work.
             # This schedules local work; accepted block rules are unchanged.
             local settle_tip settle_hash settle_delay settle_origin settle_until settled=true
+            local peer_id peer_hash settle_rank=0 our_id
             settle_tip=$(blockchain_get_latest_hash) || continue
-            settle_hash=$(_internal_hash_text "$(get_our_node_id)|$settle_tip") || continue
-            settle_delay=$((16#${settle_hash:0:4}%300))
+            our_id=$(get_our_node_id) || continue
+            settle_hash=$(_internal_hash_text "$our_id|$settle_tip") || continue
+            while IFS= read -r peer_id; do
+                [[ "$peer_id" =~ ^[a-f0-9]{64}$ ]] || continue
+                [ "$peer_id" != "$our_id" ] || continue
+                peer_hash=$(_internal_hash_text "$peer_id|$settle_tip") || continue
+                if [[ "$peer_hash" < "$settle_hash" ]] || { [ "$peer_hash" = "$settle_hash" ] && [[ "$peer_id" < "$our_id" ]]; }; then
+                    settle_rank=$((settle_rank+1))
+                fi
+            done < <(db_query_static "$DHT_DB" 'SELECT id FROM nodes ORDER BY last_seen DESC LIMIT 8;')
+            settle_delay=$((settle_rank*60+16#${settle_hash:0:4}%60))
             settle_origin=$(db_query_safe "$BLOCKCHAIN_DB" "SELECT timestamp FROM blocks WHERE hash=%s;" "$settle_tip") || continue
             [[ "$settle_origin" =~ ^[0-9]{1,12}$ ]] || continue
             settle_until=$((settle_origin+5+settle_delay))
